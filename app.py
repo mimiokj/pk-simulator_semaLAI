@@ -26,17 +26,13 @@ st.markdown("""
         border-right: 1px solid #2a3040;
     }
     .kpi-card {
-        background: #161b27;
-        border: 1px solid #2a3550;
-        border-radius: 10px;
-        padding: 14px 16px;
-        text-align: center;
-        margin-bottom: 8px;
+        background: #161b27; border: 1px solid #2a3550;
+        border-radius: 10px; padding: 14px 16px;
+        text-align: center; margin-bottom: 8px;
     }
     .kpi-label {
-        font-size: 0.68rem; color: #8892a4;
-        font-weight: 600; text-transform: uppercase;
-        letter-spacing: 0.07em; margin-bottom: 5px;
+        font-size: 0.68rem; color: #8892a4; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 5px;
     }
     .kpi-value { font-size: 1.6rem; font-weight: 700; line-height: 1.1; }
     .kpi-unit  { font-size: 0.68rem; color: #6b7585; margin-top: 3px; }
@@ -99,32 +95,67 @@ COHORT_SKIP = {
 
 # ============================================================
 # MODEL PARAMETERS — Phoenix NLME fixef (Taeheon Kim, Ph.D.)
-# Units: Dose(mg), Amount(mg), V(L), CL(L/h), C(mg/L→×1000=µg/L)
+# ============================================================
+# PML unit convention:
+#   Dose  : mg
+#   Amount: mg  (A1, FR, DR, R 모두)
+#   V     : L
+#   C     = A1 / V  → mg/L
+#   Cl    : L/h
+#   IC50, EC50_AE : mg/L  (C와 동일 단위, PML 원본 기준)
+#
+# Display:
+#   C_display = C * 1000  → µg/L  (화면 표시용만)
 # ============================================================
 P = dict(
-    V         = 25.0,    # L       central volume
-    Cl        = 3.5,     # L/h     clearance
-    Ka        = 5.2,     # h⁻¹    Wegovy fast-depot absorption
-    ka_SC     = 1.0,     # h⁻¹    SC R-depot absorption
-    F_SC      = 0.9,     # –       SC bioavailability
-    Scale_LAI = 0.2,     # –       LAI overall scaling
-    F_DR      = 0.2,     # –       delayed-release fraction
-    kdr       = 1.0,     # h⁻¹    3-transit rate
-    BW0       = 100.0,   # kg      baseline BW
-    Imax      = 0.21,    # –       max inhibition
-    IC50      = 55.0,    # µg/L    IC50 for BW
-    Gamma     = 0.5,     # –       Hill coeff
-    kout      = 0.00039, # h⁻¹    BW turnover
-    E0_AE     = 0.4833,  # –       baseline GI AE
-    Emax_AE   = 0.2867,  # –       max GI AE increment
-    EC50_AE   = 32.98,   # µg/L    EC50 for GI AE
+    # PK
+    V         = 25.0,      # L
+    Cl        = 3.5,       # L/h
+    Ka        = 5.2,       # h⁻¹  FR depot → A1
+    ka_SC     = 1.0,       # h⁻¹  R depot  → A1
+    F_SC      = 0.9,       # –    Wegovy SC bioavailability
+    Scale_LAI = 0.2,       # –    DWJ1691 LAI scaling
+    F_DR      = 0.2,       # –    delayed-release fraction
+    # F_FR = F_SC - F_DR = 0.7 (fast-release fraction)
+    kdr       = 1.0,       # h⁻¹  3-transit delayed rate
+
+    # BW PD (Indirect Response, sigmoidal Imax)
+    # C 단위: mg/L  → IC50도 mg/L
+    BW0       = 100.0,     # kg
+    Imax      = 0.21,
+    IC50      = 0.055,     # mg/L  (= 55 µg/L ÷ 1000)
+    Gamma     = 0.5,
+    kout      = 0.00039,   # h⁻¹
+
+    # GI AE (Simple Emax)
+    # C 단위: mg/L  → EC50_AE도 mg/L
+    E0_AE     = 0.4833,
+    Emax_AE   = 0.2867,
+    EC50_AE   = 0.03298,   # mg/L  (= 32.98 µg/L ÷ 1000)
 )
 
 # ============================================================
-# ODE
+# ODE — PML → Python 직번역
 # ============================================================
-def build_ode(p, doses_sema, doses_fr, doses_dr):
-    def dose_rate(dlist, t, dur=0.5):
+# State vector: [A1, FR, DR, DR1, DR2, DR3, R, BW]
+#
+# PML dosepoint 처리:
+#   dosepoint(FR, bioavail = Scale_LAI * F_FR)
+#     → DWJ1691 dose * Scale_LAI * F_FR 가 FR에 주입
+#   dosepoint(DR, bioavail = Scale_LAI * F_DR)
+#     → DWJ1691 dose * Scale_LAI * F_DR 가 DR에 주입
+#   dosepoint(R,  bioavail = F_SC)
+#     → Wegovy dose * F_SC 가 R에 주입
+# ============================================================
+def build_ode(p, doses_R, doses_FR, doses_DR):
+    """
+    doses_R  : [(time_h, raw_dose_mg), ...]  Wegovy SC
+    doses_FR : [(time_h, raw_dose_mg), ...]  DWJ1691 LAI
+    doses_DR : [(time_h, raw_dose_mg), ...]  DWJ1691 LAI (same time, same dose)
+    bioavail 은 이미 dose 계산 시 적용됨
+    """
+    def bolus_rate(dlist, t, dur=0.5):
+        """볼러스를 짧은 infusion으로 근사 (수치 안정성)"""
         val = 0.0
         for (td, amt) in dlist:
             if td <= t < td + dur:
@@ -134,79 +165,109 @@ def build_ode(p, doses_sema, doses_fr, doses_dr):
     def ode(t, y):
         A1, FR, DR, DR1, DR2, DR3, R, BW = [max(v, 0.0) for v in y]
 
-        C_mgL = A1 / p['V']
-        C_ugL = C_mgL * 1000.0   # µg/L for PD
+        # C = A1 / V  (mg/L) — PML 원본과 동일
+        C = A1 / p['V']
 
-        dA1  = -(p['Cl'] * C_mgL) + p['Ka'] * FR + p['kdr'] * DR3 + p['ka_SC'] * R
-        dFR  = -(FR  * p['Ka'])  + dose_rate(doses_fr,   t)
-        dDR  = -(DR  * p['kdr']) + dose_rate(doses_dr,   t)
-        dDR1 =  (DR  * p['kdr']) - DR1 * p['kdr']
-        dDR2 =  (DR1 * p['kdr']) - DR2 * p['kdr']
-        dDR3 =  (DR2 * p['kdr']) - DR3 * p['kdr']
-        dR   = -(R * p['ka_SC']) + dose_rate(doses_sema, t)
+        # ── PK (PML deriv 블록 직번역) ──
+        dA1  = -(p['Cl'] * C) + (p['ka_SC'] * R) + (FR * p['Ka']) + (DR3 * p['kdr'])
+        dFR  = -(FR * p['Ka'])   + bolus_rate(doses_FR, t)
+        dDR  = -(DR * p['kdr'])  + bolus_rate(doses_DR, t)
+        dDR1 = (DR  * p['kdr']) - (DR1 * p['kdr'])
+        dDR2 = (DR1 * p['kdr']) - (DR2 * p['kdr'])
+        dDR3 = (DR2 * p['kdr']) - (DR3 * p['kdr'])
+        dR   = -(R * p['ka_SC']) + bolus_rate(doses_R, t)
 
-        E   = (p['Imax'] * C_ugL**p['Gamma']) / \
-              (p['IC50']**p['Gamma'] + C_ugL**p['Gamma'] + 1e-10)
+        # ── BW PD (Indirect Response) ──
+        # E = (Imax * C^Gamma) / (IC50^Gamma + C^Gamma)
+        # C, IC50 모두 mg/L
+        C_safe = max(C, 0.0)
+        E   = (p['Imax'] * C_safe**p['Gamma']) / \
+              (p['IC50']**p['Gamma'] + C_safe**p['Gamma'] + 1e-15)
         CB  = 100.0 - 6.0 * (1.0 - np.exp(-0.0001 * t))
         kin = p['kout'] * CB
         dBW = kin * (1.0 - E) - p['kout'] * BW
 
         return [dA1, dFR, dDR, dDR1, dDR2, dDR3, dR, dBW]
+
     return ode
 
 # ============================================================
-# DOSE BUILDERS
+# DOSE SCHEDULE BUILDERS
 # ============================================================
-def wegovy_doses(skip_block=None):
-    levels = [0.25, 0.5, 1.0, 1.7, 2.4]  # mg
+def build_wegovy_doses(skip_block=None):
+    """
+    Wegovy SC: 주1회, 4주 블록 × 5단계 용량 escalation
+    dosepoint(R, bioavail = F_SC)
+    → R depot에 들어가는 양 = raw_dose * F_SC
+    """
+    levels = [0.25, 0.5, 1.0, 1.7, 2.4]   # mg (raw dose)
+    F_SC   = P['F_SC']
     out = []
     for blk in range(5):
         if blk == skip_block:
             continue
-        amt = levels[blk] * P['F_SC']
         for w in range(4):
-            out.append(((blk * 28 + w * 7) * 24.0, amt))
+            t_h = (blk * 28 + w * 7) * 24.0
+            out.append((t_h, levels[blk] * F_SC))   # bioavail 적용
     return out
 
-def dwj_doses(skip_block, dose_mg):
+def build_dwj_doses(skip_block, dose_mg):
+    """
+    DWJ1691 LAI: 월1회 SC
+    dosepoint(FR, bioavail = Scale_LAI * F_FR)
+    dosepoint(DR, bioavail = Scale_LAI * F_DR)
+    F_FR = F_SC - F_DR
+    """
     if skip_block is None:
         return [], []
-    t_h    = skip_block * 28 * 24.0
-    F_FR   = P['F_SC'] - P['F_DR']
-    fr_amt = dose_mg * P['Scale_LAI'] * F_FR
-    dr_amt = dose_mg * P['Scale_LAI'] * P['F_DR']
-    return [(t_h, fr_amt)], [(t_h, dr_amt)]
+    t_h     = skip_block * 28 * 24.0
+    F_FR    = P['F_SC'] - P['F_DR']     # 0.9 - 0.2 = 0.7
+    F_DR    = P['F_DR']                  # 0.2
+    Scale   = P['Scale_LAI']             # 0.2
+
+    doses_FR = [(t_h, dose_mg * Scale * F_FR)]   # FR depot 주입량
+    doses_DR = [(t_h, dose_mg * Scale * F_DR)]   # DR depot 주입량
+    return doses_FR, doses_DR
 
 # ============================================================
 # SIMULATION
 # ============================================================
 def run_one(coh, dwj_mg, sim_weeks, p):
-    skip     = COHORT_SKIP[coh]
-    ds       = wegovy_doses(skip)
-    dfr, ddr = dwj_doses(skip, dwj_mg)
-    ode      = build_ode(p, ds, dfr, ddr)
+    skip          = COHORT_SKIP[coh]
+    doses_R       = build_wegovy_doses(skip)
+    doses_FR, doses_DR = build_dwj_doses(skip, dwj_mg)
 
+    ode    = build_ode(p, doses_R, doses_FR, doses_DR)
     t_end  = sim_weeks * 7 * 24.0
     t_eval = np.linspace(0, t_end, int(t_end) + 1)
     y0     = [0.0] * 7 + [p['BW0']]
 
-    sol = solve_ivp(ode, [0, t_end], y0, t_eval=t_eval,
-                    method='LSODA', rtol=1e-6, atol=1e-9)
+    sol = solve_ivp(
+        ode, [0, t_end], y0,
+        t_eval=t_eval,
+        method='LSODA',
+        rtol=1e-6, atol=1e-10,
+        dense_output=False
+    )
 
-    t_h   = sol.t
-    C_ugL = np.clip(sol.y[0], 0, None) / p['V'] * 1000.0
-    BW    = np.clip(sol.y[7], 0, None)
+    t_h    = sol.t
+    C_mgL  = np.clip(sol.y[0], 0, None) / p['V']     # mg/L
+    C_ugL  = C_mgL * 1000.0                           # µg/L (display)
+    BW     = np.clip(sol.y[7], 0, None)
     BW_pct = (BW - p['BW0']) / p['BW0'] * 100.0
-    GI    = np.clip(
-        p['E0_AE'] + p['Emax_AE'] * C_ugL / (p['EC50_AE'] + C_ugL + 1e-10),
+
+    # GI AE: AE_drug = (Emax_AE * C) / (EC50_AE + C), C in mg/L
+    GI = np.clip(
+        p['E0_AE'] + p['Emax_AE'] * C_mgL / (p['EC50_AE'] + C_mgL + 1e-15),
         0, 1) * 100.0
 
-    return dict(t_h=t_h, C_ugL=C_ugL, BW_pct=BW_pct, GI=GI)
+    return dict(t_h=t_h, C_mgL=C_mgL, C_ugL=C_ugL,
+                BW_pct=BW_pct, GI=GI)
 
 @st.cache_data(show_spinner=False)
 def run_all(cohorts, dwj_mg, sim_weeks):
-    p = {**P}
-    return {coh: run_one(coh, dwj_mg, sim_weeks, p) for coh in cohorts}
+    return {coh: run_one(coh, dwj_mg, sim_weeks, P)
+            for coh in cohorts}
 
 def pk_params(t_h, C_ugL):
     Cmax  = float(np.max(C_ugL))
@@ -247,8 +308,9 @@ st.markdown("""
   <span class="badge">Phoenix NLME</span>
 </div>
 <div class="main-sub">
-  1-Cpt · Multiple Absorption (LAI + SC) · Indirect Response BW · Simple Emax GI AE<br>
-  <b style="color:#60a5fa">Modeler: Taeheon Kim, Ph.D.</b>
+  1-Cpt · Multiple Absorption (LAI fast+delayed + Wegovy SC)
+  · Indirect Response BW · Simple Emax GI AE<br>
+  <b style="color:#60a5fa">Modeler: Taeheon Kim, Ph.D. · 2026-02-19</b>
 </div>
 """, unsafe_allow_html=True)
 
@@ -269,7 +331,7 @@ k1, k2, k3, k4 = st.columns(4)
 with k1:
     st.markdown(f"""<div class="kpi-card">
       <div class="kpi-label">C<sub>max</sub> (all cohorts)</div>
-      <div class="kpi-value kpi-blue">{np.max(all_C):.1f}</div>
+      <div class="kpi-value kpi-blue">{np.max(all_C):.2f}</div>
       <div class="kpi-unit">µg/L</div></div>""", unsafe_allow_html=True)
 with k2:
     st.markdown(f"""<div class="kpi-card">
@@ -279,7 +341,7 @@ with k2:
 with k3:
     st.markdown(f"""<div class="kpi-card">
       <div class="kpi-label">Max BW Loss</div>
-      <div class="kpi-value kpi-green">{np.min(all_bw):.1f}%</div>
+      <div class="kpi-value kpi-green">{np.min(all_bw):.2f}%</div>
       <div class="kpi-unit">body weight</div></div>""", unsafe_allow_html=True)
 with k4:
     st.markdown(f"""<div class="kpi-card">
@@ -294,11 +356,11 @@ st.markdown('<div class="sec-hdr">PK Profile — Plasma Concentration (µg/L)</d
             unsafe_allow_html=True)
 fig_pk = go.Figure()
 for coh, r in results.items():
-    s = max(1, len(r['t_h']) // 500)
+    s = max(1, len(r['t_h']) // 600)
     fig_pk.add_trace(go.Scatter(
         x=r['t_h'][::s], y=r['C_ugL'][::s], name=coh,
         line=dict(color=COHORT_COLORS[coh], width=2),
-        hovertemplate="%{x:.0f} h — %{y:.2f} µg/L"
+        hovertemplate="%{x:.0f} h — %{y:.3f} µg/L"
     ))
 fig_pk.update_layout(
     **BASE_LAYOUT, height=340,
@@ -316,7 +378,7 @@ with col_bw:
                 unsafe_allow_html=True)
     fig_bw = go.Figure()
     for coh, r in results.items():
-        s = max(1, len(r['t_h']) // 500)
+        s = max(1, len(r['t_h']) // 600)
         fig_bw.add_trace(go.Scatter(
             x=r['t_h'][::s], y=r['BW_pct'][::s], name=coh,
             line=dict(color=COHORT_COLORS[coh], width=2),
@@ -332,7 +394,7 @@ with col_gi:
                 unsafe_allow_html=True)
     fig_gi = go.Figure()
     for coh, r in results.items():
-        s = max(1, len(r['t_h']) // 500)
+        s = max(1, len(r['t_h']) // 600)
         fig_gi.add_trace(go.Scatter(
             x=r['t_h'][::s], y=r['GI'][::s], name=coh,
             line=dict(color=COHORT_COLORS[coh], width=2),
@@ -352,10 +414,10 @@ for coh, r in results.items():
     Cmax, Tmax, AUC, Clast = pk_params(r['t_h'], r['C_ugL'])
     rows.append({
         "Cohort":            coh,
-        "Cmax (µg/L)":      round(Cmax,  2),
+        "Cmax (µg/L)":      round(Cmax,  3),
         "Tmax (h)":         round(Tmax,  1),
         "AUClast (µg·h/L)": round(AUC,   1),
-        "Clast (µg/L)":     round(Clast, 2),
+        "Clast (µg/L)":     round(Clast, 3),
         "Max ΔBW (%)":      round(float(np.min(r['BW_pct'])), 2),
         "Peak GI AE (%)":   round(float(np.max(r['GI'])),     1),
     })
@@ -363,10 +425,10 @@ df = pd.DataFrame(rows)
 st.dataframe(df, use_container_width=True, hide_index=True,
     column_config={
         "Cohort":            st.column_config.TextColumn(width="large"),
-        "Cmax (µg/L)":       st.column_config.NumberColumn(format="%.2f"),
+        "Cmax (µg/L)":       st.column_config.NumberColumn(format="%.3f"),
         "Tmax (h)":          st.column_config.NumberColumn(format="%.1f"),
         "AUClast (µg·h/L)":  st.column_config.NumberColumn(format="%.1f"),
-        "Clast (µg/L)":      st.column_config.NumberColumn(format="%.2f"),
+        "Clast (µg/L)":      st.column_config.NumberColumn(format="%.3f"),
         "Max ΔBW (%)":       st.column_config.NumberColumn(format="%.2f"),
         "Peak GI AE (%)":    st.column_config.NumberColumn(format="%.1f"),
     })
@@ -381,27 +443,33 @@ st.markdown("---")
 with st.expander("📋 Model Parameters (Phoenix NLME fixef)"):
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown("**PK**")
+        st.markdown("**PK — 1-Cpt Multiple Absorption**")
         st.markdown(f"- V = {P['V']} L")
         st.markdown(f"- CL = {P['Cl']} L/h")
-        st.markdown(f"- Ka (Wegovy) = {P['Ka']} h⁻¹")
-        st.markdown(f"- ka_SC = {P['ka_SC']} h⁻¹")
+        st.markdown(f"- Ka (FR→A1) = {P['Ka']} h⁻¹")
+        st.markdown(f"- ka_SC (R→A1) = {P['ka_SC']} h⁻¹")
         st.markdown(f"- F_SC = {P['F_SC']}")
         st.markdown(f"- Scale_LAI = {P['Scale_LAI']}")
-        st.markdown(f"- F_DR = {P['F_DR']}")
+        st.markdown(f"- F_DR = {P['F_DR']}  →  F_FR = {P['F_SC']-P['F_DR']}")
         st.markdown(f"- kdr = {P['kdr']} h⁻¹")
     with c2:
-        st.markdown("**BW PD (Indirect Response)**")
+        st.markdown("**BW PD — Indirect Response**")
         st.markdown(f"- Imax = {P['Imax']}")
-        st.markdown(f"- IC50 = {P['IC50']} µg/L")
+        st.markdown(f"- IC50 = {P['IC50']} mg/L (= {P['IC50']*1000:.1f} µg/L)")
         st.markdown(f"- Gamma = {P['Gamma']}")
         st.markdown(f"- kout = {P['kout']} h⁻¹")
         st.markdown(f"- BW₀ = {P['BW0']} kg")
+        st.markdown(f"- Current_Baseline = 100 − 6×(1−e^(−0.0001t))")
     with c3:
-        st.markdown("**GI AE (Simple Emax)**")
+        st.markdown("**GI AE — Simple Emax**")
         st.markdown(f"- E0 = {P['E0_AE']}")
         st.markdown(f"- Emax = {P['Emax_AE']}")
-        st.markdown(f"- EC50 = {P['EC50_AE']} µg/L")
+        st.markdown(f"- EC50 = {P['EC50_AE']} mg/L (= {P['EC50_AE']*1000:.2f} µg/L)")
+        st.markdown("---")
+        st.markdown("**Dose Units**")
+        st.markdown("- Wegovy: mg SC q1w")
+        st.markdown("- DWJ1691: mg SC q4w")
+        st.markdown("- C = A1/V → mg/L (×1000 = µg/L 표시)")
 
 st.markdown("""
 <div style='text-align:center;color:#2a3560;font-size:0.72rem;padding:6px 0;margin-top:8px'>
