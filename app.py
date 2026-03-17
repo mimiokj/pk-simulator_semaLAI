@@ -65,8 +65,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
 .kpi-value { font-size: 1.8rem; font-weight: 700; line-height: 1.0; }
 .kpi-unit  { font-size: 0.68rem; color: #94a3b8; margin-top: 4px; }
-.cv-blue   { color: #2166ac; } .cv-red    { color: #dc2626; }
-.cv-green  { color: #16a34a; } .cv-orange { color: #d97706; }
+.cv-blue { color: #2166ac; } .cv-red    { color: #dc2626; }
+.cv-green{ color: #16a34a; } .cv-orange { color: #d97706; }
 .chart-card {
     background: #ffffff; border-radius: 12px; padding: 18px 20px;
     margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
@@ -81,9 +81,6 @@ hr { border-color: #2d4a6e !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================================
-# PLOTLY THEME
-# ============================================================
 CHART_BG = dict(
     paper_bgcolor="#ffffff", plot_bgcolor="#fafbfc",
     font=dict(family="Inter, sans-serif", color="#334155", size=12),
@@ -114,44 +111,106 @@ COHORT_DASH = {
     "Cohort III (W-W-W-W-T)": "solid",
 }
 
-# ============================================================
-# STUDY DESIGN
-# ============================================================
-WEGOVY_LEVELS = [0.25, 0.5, 1.0, 1.7, 2.4]
-
-COHORT_CONFIG = {
-    "Reference":               {"skip_block": None, "dwj_block": None, "dwj_dose": 0.0},
-    "Cohort I (W-W-T-W-W)":   {"skip_block": 2, "dwj_block": 2, "dwj_dose": WEGOVY_LEVELS[2]*8},
-    "Cohort II (W-W-W-T-W)":  {"skip_block": 3, "dwj_block": 3, "dwj_dose": WEGOVY_LEVELS[3]*8},
-    "Cohort III (W-W-W-W-T)": {"skip_block": 4, "dwj_block": 4, "dwj_dose": WEGOVY_LEVELS[4]*8},
-}
 SIM_WEEKS = 28
+HOURS_PER_WEEK = 168.0  # 7 × 24
 
 # ============================================================
 # MODEL PARAMETERS — Phoenix NLME fixef (Taeheon Kim, Ph.D.)
-# Dose(mg) × 1000 = Amount(µg), C = Amount/V (µg/L)
+# ============================================================
+# 단위 체계 (엑셀 표 기준):
+#   Amount : µg  (dose 표의 숫자 그대로)
+#   V      : L
+#   C      : µg/L  (= Amount / V)
+#   CL     : L/h
+#   IC50   : µg/L
 # ============================================================
 P = dict(
     V         = 12.4,
     Cl        = 0.0475,
-    Ka        = 0.1026,
-    ka_SC     = 0.0296,
+    Ka        = 0.1026,    # h⁻¹  FR depot → A1 (DWJ LAI fast)
+    ka_SC     = 0.0296,    # h⁻¹  R depot  → A1 (Wegovy SC)
     F_SC      = 0.9,
     Scale_LAI = 0.2459,
-    F_DR      = 0.429,
+    F_DR      = 0.429,     # F_FR = 0.9 - 0.429 = 0.471
     kdr       = 0.02,
     BW0       = 100.0,
     Imax      = 0.21,
-    IC50      = 55.0,
+    IC50      = 55.0,      # µg/L
     Gamma     = 0.5,
     kout      = 0.00039,
     E0_AE     = 0.4833,
     Emax_AE   = 0.2867,
-    EC50_AE   = 32.98,
+    EC50_AE   = 32.98,     # µg/L
 )
 
 # ============================================================
-# ODE
+# DOSING SCHEDULE — 엑셀 표 기준 (단위: µg, hours)
+# ============================================================
+# Wegovy 용량 단계 (µg)
+WEGOVY_DOSE_UG = [250, 500, 1000, 1700, 2400]
+
+def build_all_events(cohort_name):
+    """
+    엑셀 표를 그대로 구현:
+    - Wegovy SC: 168h 간격, 각 단계 4회씩 (0~3192h)
+    - DWJ1691 LAI: 코호트별 1회
+
+    반환:
+      ev_R  : Wegovy → R depot [(t_h, amt_ug), ...]
+      ev_FR : DWJ fast → FR depot
+      ev_DR : DWJ delayed → DR depot
+    """
+
+    # ── Wegovy 투여 스케줄 (Reference 기준 전체) ──
+    # 블록 0: 250µg × 4회 (0, 168, 336, 504h)
+    # 블록 1: 500µg × 4회 (672, 840, 1008, 1176h)
+    # 블록 2: 1000µg × 4회 (1344, 1512, 1680, 1848h)
+    # 블록 3: 1700µg × 4회 (2016, 2184, 2352, 2520h)
+    # 블록 4: 2400µg × 4회 (2688, 2856, 3024, 3192h)
+
+    # DWJ1691 투여 시점 및 용량
+    dwj_schedule = {
+        "Reference":               None,
+        "Cohort I (W-W-T-W-W)":   {"t_h": 1344.0, "dose_ug": 8000.0},
+        "Cohort II (W-W-W-T-W)":  {"t_h": 2016.0, "dose_ug": 13600.0},
+        "Cohort III (W-W-W-W-T)": {"t_h": 2688.0, "dose_ug": 19200.0},
+    }
+
+    # Wegovy 스킵할 블록 결정
+    # Cohort I: 블록 2 (1344~1848h) Wegovy 없음 → DWJ로 대체
+    # Cohort II: 블록 3 (2016~2520h) Wegovy 없음
+    # Cohort III: 블록 4 (2688~3192h) Wegovy 없음
+    skip_block = {
+        "Reference":               None,
+        "Cohort I (W-W-T-W-W)":   2,
+        "Cohort II (W-W-W-T-W)":  3,
+        "Cohort III (W-W-W-W-T)": 4,
+    }[cohort_name]
+
+    # ── Wegovy R depot 이벤트 구성 ──
+    ev_R = []
+    for blk, dose_ug in enumerate(WEGOVY_DOSE_UG):
+        if blk == skip_block:
+            continue   # 해당 블록은 DWJ1691으로 대체
+        for rep in range(4):
+            t_h = (blk * 4 + rep) * HOURS_PER_WEEK
+            # bioavail=F_SC 적용
+            ev_R.append((t_h, dose_ug * P['F_SC']))
+
+    # ── DWJ1691 FR/DR depot 이벤트 구성 ──
+    ev_FR, ev_DR = [], []
+    dwj = dwj_schedule[cohort_name]
+    if dwj is not None:
+        t_h    = dwj['t_h']
+        d_ug   = dwj['dose_ug']
+        F_FR   = P['F_SC'] - P['F_DR']      # 0.471
+        ev_FR  = [(t_h, d_ug * P['Scale_LAI'] * F_FR)]
+        ev_DR  = [(t_h, d_ug * P['Scale_LAI'] * P['F_DR'])]
+
+    return ev_R, ev_FR, ev_DR
+
+# ============================================================
+# ODE — Phoenix PML 직번역
 # ============================================================
 def build_ode(p, ev_R, ev_FR, ev_DR):
     def bolus(events, t, dur=0.5):
@@ -163,14 +222,14 @@ def build_ode(p, ev_R, ev_FR, ev_DR):
 
     def ode(t, y):
         A1, FR, DR, DR1, DR2, DR3, R, BW = [max(v, 0.0) for v in y]
-        C = A1 / p['V']
+        C = A1 / p['V']   # µg/L
 
         dA1  = -(p['Cl']*C) + (p['ka_SC']*R) + (FR*p['Ka']) + (DR3*p['kdr'])
-        dFR  = -(FR*p['Ka'])  + bolus(ev_FR, t)
-        dDR  = -(DR*p['kdr']) + bolus(ev_DR, t)
-        dDR1 = (DR*p['kdr'])  - (DR1*p['kdr'])
-        dDR2 = (DR1*p['kdr']) - (DR2*p['kdr'])
-        dDR3 = (DR2*p['kdr']) - (DR3*p['kdr'])
+        dFR  = -(FR*p['Ka'])   + bolus(ev_FR, t)
+        dDR  = -(DR*p['kdr'])  + bolus(ev_DR, t)
+        dDR1 =  (DR*p['kdr'])  - (DR1*p['kdr'])
+        dDR2 =  (DR1*p['kdr']) - (DR2*p['kdr'])
+        dDR3 =  (DR2*p['kdr']) - (DR3*p['kdr'])
         dR   = -(R*p['ka_SC']) + bolus(ev_R, t)
 
         E   = (p['Imax']*C**p['Gamma']) / (p['IC50']**p['Gamma'] + C**p['Gamma'] + 1e-15)
@@ -181,42 +240,20 @@ def build_ode(p, ev_R, ev_FR, ev_DR):
     return ode
 
 # ============================================================
-# DOSE BUILDERS
-# ============================================================
-def build_wegovy_events(skip_block=None):
-    events = []
-    for blk in range(5):
-        if blk == skip_block:
-            continue
-        amt_ug = WEGOVY_LEVELS[blk] * 1000.0 * P['F_SC']
-        for w in range(4):
-            events.append(((blk*28 + w*7)*24.0, amt_ug))
-    return events
-
-def build_dwj_events(dwj_block, dwj_dose_mg):
-    if dwj_block is None or dwj_dose_mg <= 0:
-        return [], []
-    t_h    = dwj_block * 28 * 24.0
-    amt_ug = dwj_dose_mg * 1000.0
-    F_FR   = P['F_SC'] - P['F_DR']
-    return [(t_h, amt_ug*P['Scale_LAI']*F_FR)], \
-           [(t_h, amt_ug*P['Scale_LAI']*P['F_DR'])]
-
-# ============================================================
-# SIMULATION — t_wk 없이 t_h 만 반환, 차트에서 변환
+# SIMULATION
 # ============================================================
 def simulate_cohort(coh_name, p):
-    cfg          = COHORT_CONFIG[coh_name]
-    ev_R         = build_wegovy_events(cfg['skip_block'])
-    ev_FR, ev_DR = build_dwj_events(cfg['dwj_block'], cfg['dwj_dose'])
-    ode          = build_ode(p, ev_R, ev_FR, ev_DR)
+    ev_R, ev_FR, ev_DR = build_all_events(coh_name)
+    ode   = build_ode(p, ev_R, ev_FR, ev_DR)
 
-    t_end  = SIM_WEEKS * 7 * 24.0
-    t_eval = np.linspace(0, t_end, int(t_end) + 1)
+    t_end  = SIM_WEEKS * HOURS_PER_WEEK      # 4704 h
+    # 0.25h 해상도 → weekly oscillation 정확 포착
+    n_pts  = int(t_end / 0.25) + 1
+    t_eval = np.linspace(0, t_end, n_pts)
     y0     = [0.0]*7 + [p['BW0']]
 
     sol = solve_ivp(ode, [0, t_end], y0, t_eval=t_eval,
-                    method='LSODA', rtol=1e-6, atol=1e-10)
+                    method='LSODA', rtol=1e-7, atol=1e-10)
     if not sol.success:
         return None
 
@@ -228,12 +265,10 @@ def simulate_cohort(coh_name, p):
         p['E0_AE'] + p['Emax_AE']*C_ugL / (p['EC50_AE'] + C_ugL + 1e-15),
         0.0, 1.0) * 100.0
 
-    # t_h 만 저장, Week 변환은 차트 렌더링 시점에 수행
     return {"t_h": t_h, "C_ugL": C_ugL, "BW_pct": BW_pct, "GI": GI}
 
 @st.cache_data(show_spinner=False)
-def run_simulation(active_cohorts, _version):
-    # _version 인자로 캐시 강제 갱신
+def run_simulation(active_cohorts, _ver):
     return {coh: simulate_cohort(coh, P) for coh in active_cohorts}
 
 def pk_params(t_h, C_ugL):
@@ -248,7 +283,7 @@ def pk_params(t_h, C_ugL):
 # ============================================================
 with st.sidebar:
     st.markdown('<div class="sb-logo">💊 PK/PD Simulator</div>', unsafe_allow_html=True)
-    st.markdown('<span style="font-size:0.75rem;color:#64748b">DWJ1691 + Wegovy · v1.1</span>',
+    st.markdown('<span style="font-size:0.75rem;color:#64748b">DWJ1691 + Wegovy · v1.3</span>',
                 unsafe_allow_html=True)
     st.markdown('<hr style="border-color:#2d4a6e;margin:10px 0">', unsafe_allow_html=True)
 
@@ -259,12 +294,13 @@ with st.sidebar:
     st.markdown('<hr style="border-color:#2d4a6e;margin:10px 0">', unsafe_allow_html=True)
     st.markdown('<div class="sb-hdr">DWJ1691 Dose (8× Wegovy)</div>', unsafe_allow_html=True)
     for pattern, dose, timing in [
-        ("W-W-<b>T</b>-W-W", "8.0 mg",  "wk 9"),
-        ("W-W-W-<b>T</b>-W", "13.6 mg", "wk 13"),
-        ("W-W-W-W-<b>T</b>", "19.2 mg", "wk 17"),
+        ("W-W-<b>T</b>-W-W", "8,000 µg",  "h 1344 (wk 8)"),
+        ("W-W-W-<b>T</b>-W", "13,600 µg", "h 2016 (wk 12)"),
+        ("W-W-W-W-<b>T</b>", "19,200 µg", "h 2688 (wk 16)"),
     ]:
         st.markdown(
-            f'<div class="dose-chip">{pattern} → <b>{dose}</b> at {timing}</div>',
+            f'<div class="dose-chip">{pattern} → <b>{dose}</b><br>'
+            f'<span style="font-size:0.7rem;opacity:0.8">at {timing}</span></div>',
             unsafe_allow_html=True)
 
     st.markdown('<hr style="border-color:#2d4a6e;margin:10px 0">', unsafe_allow_html=True)
@@ -291,13 +327,13 @@ st.markdown("""
   </div>
   <div class="design-strip">
     <div class="design-item"><div class="design-dot" style="background:#94a3b8"></div>
-      <span>Wegovy: 0.25→0.5→1.0→1.7→2.4 mg q1w (4wk each)</span></div>
+      <span>Wegovy: 250→500→1000→1700→2400 µg q1w (4doses each)</span></div>
     <div class="design-item"><div class="design-dot" style="background:#2166ac"></div>
-      <span>Cohort I: DWJ <b>8.0 mg</b> @ wk9</span></div>
+      <span>Cohort I: DWJ <b>8,000 µg</b> @ h1344</span></div>
     <div class="design-item"><div class="design-dot" style="background:#16a34a"></div>
-      <span>Cohort II: DWJ <b>13.6 mg</b> @ wk13</span></div>
+      <span>Cohort II: DWJ <b>13,600 µg</b> @ h2016</span></div>
     <div class="design-item"><div class="design-dot" style="background:#dc2626"></div>
-      <span>Cohort III: DWJ <b>19.2 mg</b> @ wk17</span></div>
+      <span>Cohort III: DWJ <b>19,200 µg</b> @ h2688</span></div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -308,16 +344,12 @@ if not active:
     st.stop()
 
 with st.spinner("🔬 ODE 시뮬레이션 실행 중..."):
-    # _version="v1.1" 로 캐시 강제 갱신
-    results = run_simulation(tuple(active), _version="v1.1")
+    results = run_simulation(tuple(active), _ver="v1.3")
 
 results = {k: v for k, v in results.items() if v is not None}
 if not results:
     st.error("시뮬레이션 오류가 발생했습니다.")
     st.stop()
-
-# week 변환 — 차트 렌더링 직전에 수행 (캐시 밖)
-HOURS_PER_WEEK = 7.0 * 24.0
 
 all_C  = np.concatenate([r['C_ugL']  for r in results.values()])
 all_bw = np.concatenate([r['BW_pct'] for r in results.values()])
@@ -333,8 +365,8 @@ with k1:
 with k2:
     st.markdown(f"""<div class="kpi-card kpi-red">
       <div class="kpi-label">DWJ1691 Doses</div>
-      <div class="kpi-value cv-red" style="font-size:1.35rem">8 / 13.6 / 19.2</div>
-      <div class="kpi-unit">mg · Cohort I / II / III</div></div>""", unsafe_allow_html=True)
+      <div class="kpi-value cv-red" style="font-size:1.2rem">8k / 13.6k / 19.2k</div>
+      <div class="kpi-unit">µg · Cohort I / II / III</div></div>""", unsafe_allow_html=True)
 with k3:
     st.markdown(f"""<div class="kpi-card kpi-green">
       <div class="kpi-label">Max BW Loss</div>
@@ -348,7 +380,7 @@ with k4:
 
 st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-# ---- PK Profile ----
+# ---- PK Chart ----
 st.markdown('<div class="chart-card">', unsafe_allow_html=True)
 st.markdown('<div class="sec-hdr">📈 PK Profile — Plasma Concentration (µg/L)</div>',
             unsafe_allow_html=True)
@@ -357,29 +389,27 @@ st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 fig_pk = go.Figure()
 for coh, r in results.items():
     t_wk = r['t_h'] / HOURS_PER_WEEK
-    s = max(1, len(t_wk) // 1000)
+    s = max(1, len(t_wk) // 2000)
     fig_pk.add_trace(go.Scatter(
         x=t_wk[::s], y=r['C_ugL'][::s], name=coh,
-        line=dict(color=COHORT_COLORS[coh], width=2.5, dash=COHORT_DASH[coh]),
-        hovertemplate=f"<b>{coh}</b><br>Week: %{{x:.1f}}<br>Conc: %{{y:.1f}} µg/L<extra></extra>"
+        line=dict(color=COHORT_COLORS[coh], width=2, dash=COHORT_DASH[coh]),
+        hovertemplate=f"<b>{coh}</b><br>Week: %{{x:.2f}}<br>Conc: %{{y:.1f}} µg/L<extra></extra>"
     ))
 
-vline_col = {
-    "Cohort I (W-W-T-W-W)":   "#2166ac",
-    "Cohort II (W-W-W-T-W)":  "#16a34a",
-    "Cohort III (W-W-W-W-T)": "#dc2626",
+vline_info = {
+    "Cohort I (W-W-T-W-W)":   (1344.0/HOURS_PER_WEEK, "#2166ac", "8,000µg"),
+    "Cohort II (W-W-W-T-W)":  (2016.0/HOURS_PER_WEEK, "#16a34a", "13,600µg"),
+    "Cohort III (W-W-W-W-T)": (2688.0/HOURS_PER_WEEK, "#dc2626", "19,200µg"),
 }
 for coh in active:
-    cfg = COHORT_CONFIG[coh]
-    if cfg['dwj_block'] is not None:
-        t_v = float(cfg['dwj_block']) * 4.0
+    if coh in vline_info:
+        t_v, col, lbl = vline_info[coh]
         fig_pk.add_vline(
-            x=t_v, line_dash="dash",
-            line_color=vline_col.get(coh, "#888"),
-            line_width=1.2, opacity=0.5,
-            annotation_text=f"DWJ {cfg['dwj_dose']:.1f}mg",
+            x=t_v, line_dash="dash", line_color=col,
+            line_width=1, opacity=0.4,
+            annotation_text=f"DWJ {lbl}",
             annotation_position="top",
-            annotation_font=dict(size=9, color=vline_col.get(coh, "#888"))
+            annotation_font=dict(size=9, color=col)
         )
 
 fig_pk.update_layout(
@@ -395,7 +425,6 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 # ---- BW + GI ----
 col_bw, col_gi = st.columns(2)
-
 with col_bw:
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
     st.markdown('<div class="sec-hdr">⚖️ Body Weight Change (%BW from baseline)</div>',
@@ -404,15 +433,15 @@ with col_bw:
     fig_bw = go.Figure()
     for coh, r in results.items():
         t_wk = r['t_h'] / HOURS_PER_WEEK
-        s = max(1, len(t_wk) // 1000)
+        s = max(1, len(t_wk) // 2000)
         fig_bw.add_trace(go.Scatter(
             x=t_wk[::s], y=r['BW_pct'][::s], name=coh,
-            line=dict(color=COHORT_COLORS[coh], width=2.5, dash=COHORT_DASH[coh]),
+            line=dict(color=COHORT_COLORS[coh], width=2, dash=COHORT_DASH[coh]),
             hovertemplate=f"<b>{coh}</b><br>Week: %{{x:.1f}}<br>ΔBW: %{{y:.2f}}%<extra></extra>"
         ))
-    fig_bw.add_hline(y=0, line_dash="dot", line_color="#cbd5e1", line_width=1.2)
+    fig_bw.add_hline(y=0, line_dash="dot", line_color="#cbd5e1", line_width=1)
     fig_bw.update_layout(**CHART_BG, height=340,
-        xaxis_title="Time (Week)", yaxis_title="ΔBW (%) from BW₀ = 100 kg",
+        xaxis_title="Time (Week)", yaxis_title="ΔBW (%) from BW₀=100 kg",
         showlegend=False)
     st.plotly_chart(fig_bw, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
@@ -425,10 +454,10 @@ with col_gi:
     fig_gi = go.Figure()
     for coh, r in results.items():
         t_wk = r['t_h'] / HOURS_PER_WEEK
-        s = max(1, len(t_wk) // 1000)
+        s = max(1, len(t_wk) // 2000)
         fig_gi.add_trace(go.Scatter(
             x=t_wk[::s], y=r['GI'][::s], name=coh,
-            line=dict(color=COHORT_COLORS[coh], width=2.5, dash=COHORT_DASH[coh]),
+            line=dict(color=COHORT_COLORS[coh], width=2, dash=COHORT_DASH[coh]),
             hovertemplate=f"<b>{coh}</b><br>Week: %{{x:.1f}}<br>GI AE: %{{y:.1f}}%<extra></extra>"
         ))
     fig_gi.update_layout(**CHART_BG, height=340,
@@ -440,18 +469,23 @@ with col_gi:
 
 # ---- Summary Table ----
 st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-st.markdown(
-    '<div class="sec-hdr">📊 Cohort Summary — PK Parameters & PD/Safety Endpoints</div>',
-    unsafe_allow_html=True)
+st.markdown('<div class="sec-hdr">📊 Cohort Summary — PK Parameters & PD/Safety Endpoints</div>',
+            unsafe_allow_html=True)
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+dwj_doses_display = {
+    "Reference":               "—",
+    "Cohort I (W-W-T-W-W)":   "8,000",
+    "Cohort II (W-W-W-T-W)":  "13,600",
+    "Cohort III (W-W-W-W-T)": "19,200",
+}
 
 rows = []
 for coh, r in results.items():
-    cfg = COHORT_CONFIG[coh]
     Cmax, Tmax, AUC, Clast = pk_params(r['t_h'], r['C_ugL'])
     rows.append({
         "Cohort":            coh,
-        "DWJ Dose (mg)":    f"{cfg['dwj_dose']:.1f}" if cfg['dwj_dose'] > 0 else "—",
+        "DWJ Dose (µg)":    dwj_doses_display.get(coh, "—"),
         "Cmax (µg/L)":      round(Cmax,  1),
         "Tmax (h)":         round(Tmax,  1),
         "AUClast (µg·h/L)": round(AUC,   0),
@@ -464,7 +498,7 @@ df = pd.DataFrame(rows)
 st.dataframe(df, use_container_width=True, hide_index=True,
     column_config={
         "Cohort":            st.column_config.TextColumn(width="large"),
-        "DWJ Dose (mg)":     st.column_config.TextColumn(width="small"),
+        "DWJ Dose (µg)":     st.column_config.TextColumn(width="small"),
         "Cmax (µg/L)":       st.column_config.NumberColumn(format="%.1f"),
         "Tmax (h)":          st.column_config.NumberColumn(format="%.1f"),
         "AUClast (µg·h/L)":  st.column_config.NumberColumn(format="%.0f"),
@@ -480,7 +514,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 # ---- Model Info ----
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-with st.expander("📋 Model Parameters (Phoenix NLME fixef)"):
+with st.expander("📋 Model Parameters & Dosing Schedule"):
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("**PK — 1-Cpt Multiple Absorption**")
@@ -499,16 +533,20 @@ with st.expander("📋 Model Parameters (Phoenix NLME fixef)"):
         st.markdown(f"- Gamma = {P['Gamma']}")
         st.markdown(f"- kout = {P['kout']} h⁻¹")
         st.markdown(f"- BW₀ = {P['BW0']} kg (fixed)")
-        st.markdown("- CB(t) = 100 − 6×(1−e^(−0.0001t))")
-    with c3:
         st.markdown("**GI AE — Simple Emax**")
-        st.markdown(f"- E₀ = {P['E0_AE']}")
-        st.markdown(f"- Emax = {P['Emax_AE']}")
-        st.markdown(f"- EC50 = {P['EC50_AE']} µg/L")
-        st.markdown("---")
-        st.markdown("**Unit Convention**")
-        st.markdown("- Dose(mg) × 1000 → Amount(µg)")
-        st.markdown("- C = Amount(µg) / V(L) = µg/L")
+        st.markdown(f"- E₀={P['E0_AE']}, Emax={P['Emax_AE']}, EC50={P['EC50_AE']} µg/L")
+    with c3:
+        st.markdown("**Dosing Schedule (엑셀 기준)**")
+        st.markdown("*Wegovy SC q1w (µg):*")
+        st.markdown("- 250 × 4회 (h 0~504)")
+        st.markdown("- 500 × 4회 (h 672~1176)")
+        st.markdown("- 1000 × 4회 (h 1344~1848)")
+        st.markdown("- 1700 × 4회 (h 2016~2520)")
+        st.markdown("- 2400 × 4회 (h 2688~3192)")
+        st.markdown("*DWJ1691 (single SC):*")
+        st.markdown("- Cohort I: **8,000 µg** @ h1344")
+        st.markdown("- Cohort II: **13,600 µg** @ h2016")
+        st.markdown("- Cohort III: **19,200 µg** @ h2688")
 
 st.markdown("""
 <div style='text-align:center;color:#94a3b8;font-size:0.72rem;
