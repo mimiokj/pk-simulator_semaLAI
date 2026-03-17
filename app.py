@@ -161,13 +161,7 @@ PLOT_LAYOUT = dict(
         linecolor="#2a3550", tickcolor="#2a3550",
         title_font=dict(size=12, color="#8892a4")
     ),
-    legend=dict(
-        bgcolor="#1a2035", bordercolor="#2a3550",
-        borderwidth=1, font=dict(size=11),
-        orientation="h", yanchor="bottom",
-        y=1.02, xanchor="left", x=0
-    ),
-    margin=dict(l=50, r=20, t=40, b=50),
+    margin=dict(l=50, r=20, t=60, b=50),
     hovermode="x unified"
 )
 
@@ -477,8 +471,11 @@ fig_pk.update_layout(
     height=340,
     xaxis_title="Time (Week)",
     yaxis_title="Plasma concentration (µg/L)",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                xanchor="left", x=0, font=dict(size=10))
+    legend=dict(
+        bgcolor="#1a2035", bordercolor="#2a3550", borderwidth=1,
+        orientation="h", yanchor="bottom", y=1.02,
+        xanchor="left", x=0, font=dict(size=10)
+    )
 )
 st.plotly_chart(fig_pk, use_container_width=True)
 
