@@ -79,6 +79,7 @@ hr { border-color: #2d4a6e !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Plotly theme ──
 CHART_BG = dict(
     paper_bgcolor="#ffffff", plot_bgcolor="#fafbfc",
     font=dict(family="Inter, sans-serif", color="#334155", size=12),
@@ -142,17 +143,10 @@ DWJ_CONFIG = {
 }
 
 def build_dose_events(coh_name, p):
-    """
-    투여 이벤트 리스트 생성
-    R depot  : Wegovy dose × F_SC
-    FR depot : DWJ dose × Scale_LAI × F_FR
-    DR depot : DWJ dose × Scale_LAI × F_DR
-    R ↔ FR/DR 상호 배타적 (skip_block)
-    """
     cfg  = DWJ_CONFIG[coh_name]
     skip = cfg["skip"] if cfg else None
 
-    # Wegovy → R depot
+    # Wegovy → R depot (bioavail = F_SC)
     ev_R = []
     for bi, (dose_ug, times) in enumerate(WEGOVY_BLOCKS):
         if bi == skip:
@@ -165,14 +159,14 @@ def build_dose_events(coh_name, p):
     if cfg:
         t_h  = cfg["t"]
         d_ug = cfg["dose"]
-        F_FR = p['F_SC'] - p['F_DR']              # 0.471
+        F_FR = p['F_SC'] - p['F_DR']
         ev_FR = [(t_h, d_ug * p['Scale_LAI'] * F_FR)]
         ev_DR = [(t_h, d_ug * p['Scale_LAI'] * p['F_DR'])]
 
     return ev_R, ev_FR, ev_DR
 
 # ============================================================
-# ODE
+# ODE — Phoenix PML 직번역
 # ============================================================
 def make_ode(p):
     def ode(t, y):
@@ -193,42 +187,40 @@ def make_ode(p):
 
 # ============================================================
 # SIMULATION — Event-based (Phoenix 방식과 동일)
-# 각 투여 시점에 depot amount를 즉시 추가하고 구간별 ODE 적분
 # ============================================================
 def simulate_cohort(coh_name, p, t_end=4032.0):
     ev_R, ev_FR, ev_DR = build_dose_events(coh_name, p)
     ode_fn = make_ode(p)
 
-    # 모든 투여 이벤트를 시간순 정렬
+    # 투여 이벤트를 딕셔너리로 집계
     all_events = {}
     for t_h, amt in ev_R:
-        all_events.setdefault(t_h, [0.0,0.0,0.0])
-        all_events[t_h][0] += amt   # R depot index 6
+        all_events.setdefault(t_h, [0.0, 0.0, 0.0])
+        all_events[t_h][0] += amt   # R depot
     for t_h, amt in ev_FR:
-        all_events.setdefault(t_h, [0.0,0.0,0.0])
-        all_events[t_h][1] += amt   # FR depot index 1
+        all_events.setdefault(t_h, [0.0, 0.0, 0.0])
+        all_events[t_h][1] += amt   # FR depot
     for t_h, amt in ev_DR:
-        all_events.setdefault(t_h, [0.0,0.0,0.0])
-        all_events[t_h][2] += amt   # DR depot index 2
+        all_events.setdefault(t_h, [0.0, 0.0, 0.0])
+        all_events[t_h][2] += amt   # DR depot
 
-    # 구간 경계점 (투여 시점 + 시작/끝)
     breakpoints = sorted(set([0.0] + list(all_events.keys()) + [t_end]))
 
-    y   = np.array([0.0]*7 + [p['BW0']])
-    all_t, all_y = [], []
+    y        = np.array([0.0]*7 + [p['BW0']])
+    all_t    = []
+    all_y    = []
 
-    for i in range(len(breakpoints)-1):
+    for i in range(len(breakpoints) - 1):
         t0 = breakpoints[i]
-        t1 = breakpoints[i+1]
+        t1 = breakpoints[i + 1]
 
-        # t0에 투여 이벤트가 있으면 depot에 즉시 추가
+        # 투여 이벤트 즉시 적용
         if t0 in all_events:
             R_add, FR_add, DR_add = all_events[t0]
-            y[6] += R_add    # R depot
-            y[1] += FR_add   # FR depot
-            y[2] += DR_add   # DR depot
+            y[6] += R_add    # R
+            y[1] += FR_add   # FR
+            y[2] += DR_add   # DR
 
-        # 구간 적분 (1h 해상도)
         n_pts  = max(2, int(t1 - t0) + 1)
         t_eval = np.linspace(t0, t1, n_pts)
 
@@ -236,40 +228,35 @@ def simulate_cohort(coh_name, p, t_end=4032.0):
             ode_fn, [t0, t1], y.copy(),
             t_eval=t_eval,
             method='LSODA',
-            rtol=1e-7, atol=1e-10,
-            dense_output=False
+            rtol=1e-7, atol=1e-10
         )
         if not sol.success:
             return None
 
-        # 마지막 포인트 제외 (다음 구간과 중복)
         all_t.extend(sol.t[:-1].tolist())
         all_y.append(sol.y[:, :-1])
         y = sol.y[:, -1].copy()
 
-    # 마지막 포인트 추가
     all_t.append(t_end)
     all_y.append(y.reshape(-1, 1))
 
-    t_arr = np.array(all_t)
-    y_arr = np.hstack(all_y)
+    t_arr  = np.array(all_t)
+    y_arr  = np.hstack(all_y)
 
-    C_ugL  = np.clip(y_arr[0], 0.0, None) / p['V']
-    BW     = np.clip(y_arr[7], 0.0, None)
-    BW_pct = (BW - p['BW0']) / p['BW0'] * 100.0
-    GI_total = np.clip(
-        p['E0_AE'] + p['Emax_AE'] * C_ugL / (p['EC50_AE'] + C_ugL + 1e-15),
-        0.0, 1.0)
+    C_ugL   = np.clip(y_arr[0], 0.0, None) / p['V']
+    BW      = np.clip(y_arr[7], 0.0, None)
+    BW_pct  = (BW - p['BW0']) / p['BW0'] * 100.0
     GI_drug = np.clip(
         p['Emax_AE'] * C_ugL / (p['EC50_AE'] + C_ugL + 1e-15),
         0.0, 1.0)
+    GI_total = np.clip(p['E0_AE'] + GI_drug, 0.0, 1.0)
 
     return {
-        "t_h":      t_arr,
-        "C_ugL":    C_ugL,
-        "BW_pct":   BW_pct,
-        "GI_total": GI_total * 100.0,
-        "GI_drug":  GI_drug  * 100.0,
+        "t_h":       t_arr,
+        "C_ugL":     C_ugL,
+        "BW_pct":    BW_pct,
+        "GI_total":  GI_total * 100.0,
+        "GI_drug":   GI_drug  * 100.0,
     }
 
 @st.cache_data(show_spinner=False)
@@ -288,7 +275,7 @@ def pk_params(t_h, C_ugL):
 # ============================================================
 with st.sidebar:
     st.markdown('<div class="sb-logo">💊 PK/PD Simulator</div>', unsafe_allow_html=True)
-    st.markdown('<span style="font-size:0.75rem;color:#94a3b8">DWJ1691 + Wegovy · v2.0</span>',
+    st.markdown('<span style="font-size:0.75rem;color:#94a3b8">DWJ1691 + Wegovy · v2.1</span>',
                 unsafe_allow_html=True)
     st.markdown('<hr style="border-color:#2d4a6e;margin:10px 0">', unsafe_allow_html=True)
 
@@ -311,7 +298,7 @@ with st.sidebar:
     st.markdown('<hr style="border-color:#2d4a6e;margin:10px 0">', unsafe_allow_html=True)
     st.markdown(
         '<span style="font-size:0.72rem;color:#94a3b8">'
-        '📅 Sim: 4032h (~24wk dosing + washout)<br>'
+        '📅 Sim: 4032h (dosing + washout)<br>'
         '✅ Phoenix NLME validated<br>'
         '👨‍🔬 Taeheon Kim, Ph.D.<br>'
         '🔬 2026-02-19</span>',
@@ -335,11 +322,11 @@ st.markdown("""
     <div class="design-item"><div class="design-dot" style="background:#94a3b8"></div>
       <span>Wegovy: 250→500→1000→1700→2400 µg SC q1w (4doses each)</span></div>
     <div class="design-item"><div class="design-dot" style="background:#2166ac"></div>
-      <span>Cohort I: DWJ <b>8,000 µg</b> @ h1344 (replaces 1000µg block)</span></div>
+      <span>Cohort I: DWJ <b>8,000 µg</b> @ h1344</span></div>
     <div class="design-item"><div class="design-dot" style="background:#16a34a"></div>
-      <span>Cohort II: DWJ <b>13,600 µg</b> @ h2016 (replaces 1700µg block)</span></div>
+      <span>Cohort II: DWJ <b>13,600 µg</b> @ h2016</span></div>
     <div class="design-item"><div class="design-dot" style="background:#dc2626"></div>
-      <span>Cohort III: DWJ <b>19,200 µg</b> @ h2688 (replaces 2400µg block)</span></div>
+      <span>Cohort III: DWJ <b>19,200 µg</b> @ h2688</span></div>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -350,7 +337,7 @@ if not active:
     st.stop()
 
 with st.spinner("🔬 ODE 시뮬레이션 실행 중 (Phoenix validated)..."):
-    results = run_simulation(tuple(active), _ver="v2.0")
+    results = run_simulation(tuple(active), _ver="v2.1")
 
 results = {k: v for k, v in results.items() if v is not None}
 if not results:
@@ -394,7 +381,7 @@ st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 fig_pk = go.Figure()
 for coh, r in results.items():
     t_wk = r['t_h'] / HOURS_PER_WEEK
-    s = max(1, len(t_wk)//2000)
+    s = max(1, len(t_wk) // 2000)
     fig_pk.add_trace(go.Scatter(
         x=t_wk[::s], y=r['C_ugL'][::s], name=coh,
         line=dict(color=COHORT_COLORS[coh], width=2, dash=COHORT_DASH[coh]),
@@ -434,7 +421,7 @@ with col_bw:
     fig_bw = go.Figure()
     for coh, r in results.items():
         t_wk = r['t_h'] / HOURS_PER_WEEK
-        s = max(1, len(t_wk)//2000)
+        s = max(1, len(t_wk) // 2000)
         fig_bw.add_trace(go.Scatter(
             x=t_wk[::s], y=r['BW_pct'][::s], name=coh,
             line=dict(color=COHORT_COLORS[coh], width=2, dash=COHORT_DASH[coh]),
@@ -455,7 +442,7 @@ with col_gi:
     fig_gi = go.Figure()
     for coh, r in results.items():
         t_wk = r['t_h'] / HOURS_PER_WEEK
-        s = max(1, len(t_wk)//2000)
+        s = max(1, len(t_wk) // 2000)
         fig_gi.add_trace(go.Scatter(
             x=t_wk[::s], y=r['GI_total'][::s], name=coh,
             line=dict(color=COHORT_COLORS[coh], width=2, dash=COHORT_DASH[coh]),
@@ -475,23 +462,26 @@ st.markdown('<div class="sec-hdr">📊 Cohort Summary — PK / PD / Safety</div>
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
 DWJ_LABELS = {
-    "Reference":"—","Cohort I (W-W-T-W-W)":"8,000",
-    "Cohort II (W-W-W-T-W)":"13,600","Cohort III (W-W-W-W-T)":"19,200"
+    "Reference":               "—",
+    "Cohort I (W-W-T-W-W)":   "8,000",
+    "Cohort II (W-W-W-T-W)":  "13,600",
+    "Cohort III (W-W-W-W-T)": "19,200",
 }
 rows = []
 for coh, r in results.items():
     Cmax, Tmax, AUC, Clast = pk_params(r['t_h'], r['C_ugL'])
     rows.append({
-        "Cohort":            coh,
-        "DWJ (µg)":         DWJ_LABELS[coh],
-        "Cmax (µg/L)":      round(Cmax, 1),
-        "Tmax (h)":         round(Tmax, 1),
-        "AUClast (µg·h/L)": round(AUC,  0),
-        "Clast (µg/L)":     round(Clast,2),
-        "Max ΔBW (%)":      round(float(np.min(r['BW_pct'])),  2),
-        "Peak GI Total (%)":round(float(np.max(r['GI_total'])),1),
-        "Peak GI Drug (%)": round(float(np.max(r['GI_drug'])), 1),
+        "Cohort":             coh,
+        "DWJ (µg)":          DWJ_LABELS[coh],
+        "Cmax (µg/L)":       round(Cmax,  1),
+        "Tmax (h)":          round(Tmax,  1),
+        "AUClast (µg·h/L)":  round(AUC,   0),
+        "Clast (µg/L)":      round(Clast, 2),
+        "Max ΔBW (%)":       round(float(np.min(r['BW_pct'])),   2),
+        "Peak GI Total (%)": round(float(np.max(r['GI_total'])), 1),
+        "Peak GI Drug (%)":  round(float(np.max(r['GI_drug'])),  1),
     })
+
 df = pd.DataFrame(rows)
 st.dataframe(df, use_container_width=True, hide_index=True,
     column_config={
@@ -505,6 +495,7 @@ st.dataframe(df, use_container_width=True, hide_index=True,
         "Peak GI Total (%)":  st.column_config.NumberColumn(format="%.1f"),
         "Peak GI Drug (%)":   st.column_config.NumberColumn(format="%.1f"),
     })
+
 csv = df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇ Download Summary CSV", csv,
                    file_name="pkpd_DWJ_validated.csv", mime="text/csv")
@@ -516,34 +507,42 @@ with st.expander("📋 Model Parameters (Phoenix NLME fixef) — Validated"):
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("**PK — 1-Cpt Multiple Absorption**")
-        st.markdown(f"- V={P['V']}L, CL={P['Cl']}L/h")
-        st.markdown(f"- Ka(FR→A1)={P['Ka']} h⁻¹")
-        st.markdown(f"- ka_SC(R→A1)={P['ka_SC']} h⁻¹")
-        st.markdown(f"- F_SC={P['F_SC']}, Scale_LAI={P['Scale_LAI']}")
-        st.markdown(f"- F_DR={P['F_DR']} → F_FR={P['F_SC']-P['F_DR']:.3f}")
-        st.markdown(f"- kdr={P['kdr']} h⁻¹")
+        st.markdown(f"- V = {P['V']} L")
+        st.markdown(f"- CL = {P['Cl']} L/h")
+        st.markdown(f"- Ka (FR→A1) = {P['Ka']} h⁻¹")
+        st.markdown(f"- ka_SC (R→A1) = {P['ka_SC']} h⁻¹")
+        st.markdown(f"- F_SC = {P['F_SC']}")
+        st.markdown(f"- Scale_LAI = {P['Scale_LAI']}")
+        st.markdown(f"- F_DR = {P['F_DR']} → F_FR = {P['F_SC']-P['F_DR']:.3f}")
+        st.markdown(f"- kdr = {P['kdr']} h⁻¹")
     with c2:
         st.markdown("**BW PD — Indirect Response**")
-        st.markdown(f"- E(C)=Imax·Cᵞ/(IC50ᵞ+Cᵞ)")
-        st.markdown(f"- Imax={P['Imax']}, IC50={P['IC50']} µg/L")
-        st.markdown(f"- Gamma={P['Gamma']}, kout={P['kout']} h⁻¹")
-        st.markdown(f"- CB(t)=100−6·(1−e^(−0.0001t))")
-        st.markdown(f"- BW₀={P['BW0']} kg (fixed)")
-    with c3:
+        st.markdown(f"- Imax = {P['Imax']}, IC50 = {P['IC50']} µg/L")
+        st.markdown(f"- Gamma = {P['Gamma']}, kout = {P['kout']} h⁻¹")
+        st.markdown(f"- CB(t) = 100−6·(1−e^(−0.0001t))")
+        st.markdown(f"- BW₀ = {P['BW0']} kg (fixed)")
         st.markdown("**GI AE — Simple Emax**")
         st.markdown(f"- E₀={P['E0_AE']}, Emax={P['Emax_AE']}")
         st.markdown(f"- EC50={P['EC50_AE']} µg/L")
-        st.markdown("---")
+    with c3:
         st.markdown("**✅ Phoenix Validation**")
-        st.markdown("- t=1h: 0.5282 µg/L ✓")
-        st.markdown("- t=80h: 13.389 µg/L ✓")
-        st.markdown("- t=1344h: 43.97 µg/L ✓")
+        st.markdown("- t=1h:    0.5282 µg/L ✓")
+        st.markdown("- t=80h:  13.389  µg/L ✓")
+        st.markdown("- t=168h: 10.807  µg/L ✓")
+        st.markdown("- t=240h: 21.639  µg/L ✓")
+        st.markdown("- t=1344h: 43.97  µg/L ✓")
         st.markdown("- t=2688h: 150.72 µg/L ✓")
+        st.markdown("---")
+        st.markdown("**Dosing (µg)**")
+        st.markdown("- Wegovy: 250→500→1000→1700→2400")
+        st.markdown("- Cohort I: 8,000 @ h1344")
+        st.markdown("- Cohort II: 13,600 @ h2016")
+        st.markdown("- Cohort III: 19,200 @ h2688")
 
 st.markdown("""
 <div style='text-align:center;color:#94a3b8;font-size:0.72rem;
             padding:10px 0;margin-top:12px;background:#ffffff;
             border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.05)'>
-  ✅ Phoenix NLME Validated · Taeheon Kim, Ph.D. · 2026-02-19 · v2.0
+  ✅ Phoenix NLME Validated · Taeheon Kim, Ph.D. · 2026-02-19 · v2.1
 </div>
 """, unsafe_allow_html=True)
