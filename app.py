@@ -88,11 +88,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;
     padding: 12px 16px; font-size: 0.84rem; color: #1e40af; margin-bottom: 12px;
 }
-/* 슬라이더 레이블 색상 강제 */
 .stSlider label, .stSlider p { color: #1e293b !important; font-weight: 600 !important; font-size: 0.88rem !important; }
-.stSlider [data-testid="stTickBarMin"],
-.stSlider [data-testid="stTickBarMax"] { color: #475569 !important; }
-/* 탭 */
 .stTabs [data-baseweb="tab"] { font-size: 0.92rem; font-weight: 600; color: #334155 !important; }
 .stTabs [aria-selected="true"] { color: #1e40af !important; }
 hr { border-color: #2d4a6e !important; }
@@ -104,32 +100,35 @@ hr { border-color: #2d4a6e !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Plotly 공통 테마 — 축 색상 완전 검정 ──
-CHART_BG = dict(
-    paper_bgcolor="#ffffff",
-    plot_bgcolor="#fafbfc",
-    font=dict(family="Inter, sans-serif", color="#1e293b", size=13),
-    xaxis=dict(
-        gridcolor="#e2e8f0", gridwidth=1,
-        linecolor="#475569", tickcolor="#475569", linewidth=1.5,
-        zeroline=False,
-        title_font=dict(size=13, color="#1e293b", family="Inter, sans-serif"),
-        tickfont=dict(size=12, color="#1e293b", family="Inter, sans-serif"),
-        showline=True,
-    ),
-    yaxis=dict(
-        gridcolor="#e2e8f0", gridwidth=1,
-        linecolor="#475569", tickcolor="#475569", linewidth=1.5,
-        zeroline=False,
-        title_font=dict(size=13, color="#1e293b", family="Inter, sans-serif"),
-        tickfont=dict(size=12, color="#1e293b", family="Inter, sans-serif"),
-        showline=True,
-    ),
-    margin=dict(l=65, r=30, t=45, b=60),
-    hovermode="x unified",
-    hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0",
-                    font=dict(size=12, color="#1e293b"))
-)
+# ── Plotly 공통 테마 — 축 제목 진한 파란색 ──
+AXIS_TITLE_COLOR  = "#1e40af"   # 축 제목: 진한 파란색
+AXIS_TICK_COLOR   = "#334155"   # 눈금값: 진한 회색
+AXIS_LINE_COLOR   = "#475569"
+
+def make_chart_bg():
+    return dict(
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#fafbfc",
+        font=dict(family="Inter, sans-serif", color="#1e293b", size=13),
+        xaxis=dict(
+            gridcolor="#e2e8f0", gridwidth=1,
+            linecolor=AXIS_LINE_COLOR, tickcolor=AXIS_LINE_COLOR, linewidth=1.5,
+            zeroline=False, showline=True,
+            title_font=dict(size=13, color=AXIS_TITLE_COLOR, family="Inter, sans-serif"),
+            tickfont=dict(size=12, color=AXIS_TICK_COLOR, family="Inter, sans-serif"),
+        ),
+        yaxis=dict(
+            gridcolor="#e2e8f0", gridwidth=1,
+            linecolor=AXIS_LINE_COLOR, tickcolor=AXIS_LINE_COLOR, linewidth=1.5,
+            zeroline=False, showline=True,
+            title_font=dict(size=13, color=AXIS_TITLE_COLOR, family="Inter, sans-serif"),
+            tickfont=dict(size=12, color=AXIS_TICK_COLOR, family="Inter, sans-serif"),
+        ),
+        margin=dict(l=65, r=30, t=45, b=60),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0",
+                        font=dict(size=12, color="#1e293b"))
+    )
 
 LEGEND_STYLE = dict(
     bgcolor="rgba(255,255,255,0.95)",
@@ -139,7 +138,6 @@ LEGEND_STYLE = dict(
     font=dict(size=12, color="#1e293b")
 )
 
-# Legend 짧은 이름 매핑
 SHORT_NAMES = {
     "Reference (Wegovy)":      "Wegovy (Reference)",
     "Cohort I (W-W-T-W-W)":   "Cohort I",
@@ -186,18 +184,11 @@ COHORT_META = {
     "Cohort III (W-W-W-W-T)": {"skip": 4,    "blk": 4,    "wegovy_dose_ug": 2400},
 }
 
+# 각 코호트별 시험약 투여 시점 및 대응 Wegovy 용량 구간
 COHORT_WINDOWS = {
-    "Reference (Wegovy)":      None,
-    "Cohort I (W-W-T-W-W)":   1344.0,
-    "Cohort II (W-W-W-T-W)":  2016.0,
-    "Cohort III (W-W-W-W-T)": 2688.0,
-}
-
-# Reference window 기준시간 (각 코호트 대응)
-REF_WINDOW_T = {
-    "Cohort I (W-W-T-W-W)":   1344.0,
-    "Cohort II (W-W-W-T-W)":  2016.0,
-    "Cohort III (W-W-W-W-T)": 2688.0,
+    "Cohort I (W-W-T-W-W)":   {"t_dose": 1344.0, "wegovy_label": "1.0 mg 구간"},
+    "Cohort II (W-W-W-T-W)":  {"t_dose": 2016.0, "wegovy_label": "1.7 mg 구간"},
+    "Cohort III (W-W-W-W-T)": {"t_dose": 2688.0, "wegovy_label": "2.4 mg 구간"},
 }
 
 def make_ode(p):
@@ -383,34 +374,46 @@ with tab_std:
         st.stop()
 
     with st.spinner("🔬 ODE 시뮬레이션 실행 중..."):
-        results = run_standard(tuple(active), multiplier, t_end, _ver="v7.0")
+        results = run_standard(tuple(active), multiplier, t_end, _ver="v8.0")
     results = {k:v for k,v in results.items() if v is not None}
     if not results:
         st.error("시뮬레이션 오류가 발생했습니다."); st.stop()
 
-    # window 계산 — 체크된 코호트 전체 (Reference 포함)
-    window_params = {}
-    for coh,r in results.items():
-        t_s = COHORT_WINDOWS.get(coh)
-        if t_s is not None:
-            window_params[coh] = calc_window(r['t_h'],r['C_ugL'],r['BW_pct'],r['GI_total'],t_s,tau_h)
-        elif coh == "Reference (Wegovy)":
-            # Reference는 Cohort I window 기준으로 대표값 계산
-            window_params[coh] = calc_window(r['t_h'],r['C_ugL'],r['BW_pct'],r['GI_total'],
-                                             1344.0, tau_h)
+    ref_r = results.get("Reference (Wegovy)")
+
+    # ── window 파라미터 계산 ──────────────────────────────────
+    # 시험약 코호트: 각자 window
+    # Reference: 각 코호트 window에 대응하는 값을 개별 계산
+    test_window  = {}   # {coh: wp}
+    ref_window   = {}   # {coh: wp}  — Reference를 코호트별 window로 계산
+
+    for coh in ["Cohort I (W-W-T-W-W)",
+                "Cohort II (W-W-W-T-W)",
+                "Cohort III (W-W-W-W-T)"]:
+        t_s = COHORT_WINDOWS[coh]["t_dose"]
+        if coh in results:
+            test_window[coh] = calc_window(
+                results[coh]['t_h'], results[coh]['C_ugL'],
+                results[coh]['BW_pct'], results[coh]['GI_total'], t_s, tau_h)
+        if ref_r is not None:
+            ref_window[coh] = calc_window(
+                ref_r['t_h'], ref_r['C_ugL'],
+                ref_r['BW_pct'], ref_r['GI_total'], t_s, tau_h)
 
     all_C  = np.concatenate([r['C_ugL']   for r in results.values()])
     all_bw = np.concatenate([r['BW_pct']  for r in results.values()])
     all_gi = np.concatenate([r['GI_total']for r in results.values()])
 
     test_cmax = max(
-        (window_params[c]['Cmax'] for c in results if c != "Reference (Wegovy)"
-         and c in window_params and window_params[c]),
-        default=0)
-    ref_r = results.get("Reference (Wegovy)")
-    # Reference Cmax (Cohort I window 기준 대표)
-    ref_cmax = window_params.get("Reference (Wegovy)",{}).get("Cmax", None) if ref_r else None
-    cmax_ratio = test_cmax/ref_cmax if ref_cmax and test_cmax else 0
+        (test_window[c]['Cmax'] for c in test_window if test_window[c]), default=0)
+
+    # KPI용 Reference Cmax: 체크된 가장 첫 코호트 window 기준
+    first_test = next((c for c in ["Cohort I (W-W-T-W-W)",
+                                    "Cohort II (W-W-W-T-W)",
+                                    "Cohort III (W-W-W-W-T)"]
+                       if c in test_window), None)
+    ref_cmax_kpi = ref_window[first_test]['Cmax'] if first_test and first_test in ref_window else None
+    cmax_ratio = test_cmax/ref_cmax_kpi if ref_cmax_kpi and test_cmax else 0
     ni_ok = 0 < cmax_ratio <= ni_margin
 
     # KPI
@@ -475,24 +478,22 @@ with tab_std:
     fig_pk = go.Figure()
     for coh in active:
         if coh in shade_colors:
-            t_s = COHORT_WINDOWS[coh]/HOURS_PER_WEEK
-            t_e = (COHORT_WINDOWS[coh]+tau_h)/HOURS_PER_WEEK
+            t_s = COHORT_WINDOWS[coh]["t_dose"]/HOURS_PER_WEEK
+            t_e = (COHORT_WINDOWS[coh]["t_dose"]+tau_h)/HOURS_PER_WEEK
             fig_pk.add_vrect(x0=t_s, x1=t_e,
                 fillcolor=shade_colors[coh], line_width=0,
                 annotation_text=f"{obs_weeks}wk obs",
                 annotation_position="top left",
                 annotation_font=dict(size=9, color=COHORT_COLORS[coh]))
-
     for coh,r in results.items():
         t_wk = r['t_h']/HOURS_PER_WEEK
         s    = max(1,len(t_wk)//2000)
         fig_pk.add_trace(go.Scatter(
             x=t_wk[::s], y=r['C_ugL'][::s],
-            name=SHORT_NAMES[coh],          # ← 짧은 이름
+            name=SHORT_NAMES[coh],
             line=dict(color=COHORT_COLORS[coh], width=2.5, dash=COHORT_DASH[coh]),
             hovertemplate=f"<b>{SHORT_NAMES[coh]}</b><br>Week: %{{x:.1f}}<br>Conc: %{{y:.1f}} µg/L<extra></extra>"
         ))
-
     for coh in active:
         if coh in vline_info:
             t_v,col,lbl = vline_info[coh]
@@ -501,8 +502,7 @@ with tab_std:
                              annotation_text=f"DWJ {lbl}",
                              annotation_position="top",
                              annotation_font=dict(size=10, color=col))
-
-    fig_pk.update_layout(**CHART_BG, height=440,
+    fig_pk.update_layout(**make_chart_bg(), height=440,
         xaxis_title="Time (Week)",
         yaxis_title="Plasma concentration (µg/L)",
         legend=LEGEND_STYLE)
@@ -526,7 +526,7 @@ with tab_std:
                 hovertemplate=f"<b>{SHORT_NAMES[coh]}</b><br>Week: %{{x:.1f}}<br>ΔBW: %{{y:.2f}}%<extra></extra>"
             ))
         fig_bw.add_hline(y=0,line_dash="dot",line_color="#94a3b8",line_width=1.2)
-        fig_bw.update_layout(**CHART_BG, height=330,
+        fig_bw.update_layout(**make_chart_bg(), height=330,
             xaxis_title="Time (Week)", yaxis_title="ΔBW (%) from BW₀=100kg",
             legend=LEGEND_STYLE)
         st.plotly_chart(fig_bw, use_container_width=True)
@@ -546,14 +546,19 @@ with tab_std:
                 line=dict(color=COHORT_COLORS[coh],width=2.5,dash=COHORT_DASH[coh]),
                 hovertemplate=f"<b>{SHORT_NAMES[coh]}</b><br>Week: %{{x:.1f}}<br>GI AE: %{{y:.1f}}%<extra></extra>"
             ))
-        fig_gi.update_layout(**CHART_BG, height=330,
+        fig_gi.update_layout(**make_chart_bg(), height=330,
             xaxis_title="Time (Week)", yaxis_title="GI AE Total (%)",
             legend=LEGEND_STYLE)
         fig_gi.update_yaxes(range=[0,100])
         st.plotly_chart(fig_gi, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 결과 테이블 — "구분" 컬럼, 체크된 코호트 전체, Cavg 대조약 삭제
+    # ── 결과 테이블 ───────────────────────────────────────────
+    # 구조:
+    #   Reference → 코호트별 대응 window로 각각 행 출력
+    #     "Wegovy (1.0 mg 구간)", "Wegovy (1.7 mg 구간)", "Wegovy (2.4 mg 구간)"
+    #   시험약 코호트 → 각자 window
+    # ─────────────────────────────────────────────────────────
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
     st.markdown(
         f'<div class="sec-hdr">📊 관찰 구간 결과 요약'
@@ -561,38 +566,49 @@ with tab_std:
         unsafe_allow_html=True)
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
+    # 코호트별 대응 관계
+    coh_pairs = [
+        ("Cohort I (W-W-T-W-W)",   "Wegovy (1.0 mg 구간)"),
+        ("Cohort II (W-W-W-T-W)",  "Wegovy (1.7 mg 구간)"),
+        ("Cohort III (W-W-W-W-T)", "Wegovy (2.4 mg 구간)"),
+    ]
+
     rows = []
-    # 체크된 순서대로 Reference 포함 전체 출력
-    cohort_order = ["Reference (Wegovy)",
-                    "Cohort I (W-W-T-W-W)",
-                    "Cohort II (W-W-W-T-W)",
-                    "Cohort III (W-W-W-W-T)"]
-    for coh in cohort_order:
-        if coh not in results: continue
-        wp   = window_params.get(coh)
+    for coh, ref_label in coh_pairs:
         dose_ug = COHORT_META[coh]['wegovy_dose_ug'] * multiplier
         dose_mg = dose_ug/1000
 
-        if coh == "Reference (Wegovy)":
-            dose_str = "—  (대조약)"
-        else:
-            dose_str = f"{dose_mg:.1f}mg ({dose_ug:,}µg)"
+        rw = ref_window.get(coh)   # Reference, 해당 코호트 window 기준
 
-        ni_sym = "—"
-        if coh != "Reference (Wegovy)" and wp and ref_cmax:
-            ni_sym = "✅" if wp['Cmax']/ref_cmax <= ni_margin else "⚠️"
+        # Reference 행 (체크되어 있을 때만)
+        if "Reference (Wegovy)" in results and rw:
+            rows.append({
+                "구분":            ref_label,
+                "시험약 용량":     "— (대조약)",
+                "Cmax (µg/L)":    round(rw['Cmax'],  1),
+                "Tmax (h)":       round(rw['Tmax'],  1),
+                "AUCτ (µg·h/L)": round(rw['AUCtau'],0),
+                "Cavg (µg/L)":    round(rw['Cavg'],  3),
+                "ΔBW τ (%)":      round(rw['dBW'],   2),
+                "Peak GI (%)":    round(rw['peak_GI'],1),
+                "안전성 판정":     "—",
+            })
 
-        rows.append({
-            "구분":              SHORT_NAMES[coh],
-            "시험약 용량":       dose_str,
-            "Cmax (µg/L)":      round(wp['Cmax'],  1) if wp else None,
-            "Tmax (h)":         round(wp['Tmax'],  1) if wp else None,
-            "AUCτ (µg·h/L)":   round(wp['AUCtau'],0) if wp else None,
-            "Cavg (µg/L)":      round(wp['Cavg'],  3) if wp else None,
-            "ΔBW τ (%)":        round(wp['dBW'],   2) if wp else None,
-            "Peak GI (%)":      round(wp['peak_GI'],1) if wp else None,
-            "안전성 판정":       ni_sym,
-        })
+        # 시험약 행
+        if coh in results and coh in test_window and test_window[coh]:
+            tw = test_window[coh]
+            ni_sym = "✅" if (rw and tw['Cmax']/rw['Cmax']<=ni_margin) else "⚠️"
+            rows.append({
+                "구분":            SHORT_NAMES[coh],
+                "시험약 용량":     f"{dose_mg:.1f}mg ({dose_ug:,}µg)",
+                "Cmax (µg/L)":    round(tw['Cmax'],  1),
+                "Tmax (h)":       round(tw['Tmax'],  1),
+                "AUCτ (µg·h/L)": round(tw['AUCtau'],0),
+                "Cavg (µg/L)":    round(tw['Cavg'],  3),
+                "ΔBW τ (%)":      round(tw['dBW'],   2),
+                "Peak GI (%)":    round(tw['peak_GI'],1),
+                "안전성 판정":     ni_sym,
+            })
 
     if rows:
         df = pd.DataFrame(rows)
@@ -621,8 +637,7 @@ with tab_custom:
     st.markdown("""
     <div class="custom-info">
     ⚙️ <b>커스텀 투약 스케줄 설계</b> — 투약 시점, 용량, 약물 종류를 자유롭게 설정합니다.<br>
-    <b>Wegovy SC</b> → R depot (bioavail=F_SC) &nbsp;|&nbsp;
-    <b>DWJ1691 LAI</b> → FR+DR depot (bioavail=Scale_LAI×F_FR/F_DR)
+    <b>Wegovy SC</b> → R depot &nbsp;|&nbsp; <b>DWJ1691 LAI</b> → FR+DR depot
     </div>
     """, unsafe_allow_html=True)
 
@@ -677,13 +692,13 @@ with tab_custom:
             st.session_state.update({
                 "custom_result": cr, "custom_events": ev,
                 "cs_obs_t": cs_obs_t, "cs_tau": cs_obs_dur*HOURS_PER_WEEK,
-                "cs_label": cs_label, "cs_sim_wk": cs_sim_wk,
+                "cs_label": cs_label,
             })
 
-        cr     = st.session_state.get("custom_result")
-        c_obs  = st.session_state.get("cs_obs_t", cs_obs_t)
-        c_tau  = st.session_state.get("cs_tau", cs_obs_dur*HOURS_PER_WEEK)
-        c_lbl  = st.session_state.get("cs_label", cs_label)
+        cr    = st.session_state.get("custom_result")
+        c_obs = st.session_state.get("cs_obs_t", cs_obs_t)
+        c_tau = st.session_state.get("cs_tau", cs_obs_dur*HOURS_PER_WEEK)
+        c_lbl = st.session_state.get("cs_label", cs_label)
 
         if cr:
             st.markdown(f"---\n#### 📈 결과: **{c_lbl}**")
@@ -700,7 +715,7 @@ with tab_custom:
                 x0=c_obs/HOURS_PER_WEEK, x1=(c_obs+c_tau)/HOURS_PER_WEEK,
                 fillcolor="rgba(124,58,237,0.08)", line_width=0,
                 annotation_text="관찰구간",
-                annotation_font=dict(size=9,color="#7c3aed"))
+                annotation_font=dict(size=9, color="#7c3aed"))
             fig_cpk.add_trace(go.Scatter(
                 x=t_wk_c[::s_c], y=cr['C_ugL'][::s_c],
                 name=c_lbl, line=dict(color="#7c3aed",width=2.5),
@@ -708,11 +723,11 @@ with tab_custom:
             ev_cs = st.session_state.get("custom_events",{})
             for t_ev,amts in sorted(ev_cs.items()):
                 col_ev = "#2166ac" if amts[0]>0 else "#dc2626"
-                fig_cpk.add_vline(x=t_ev/HOURS_PER_WEEK,line_dash="dot",
-                                  line_color=col_ev,line_width=1,opacity=0.4,
+                fig_cpk.add_vline(x=t_ev/HOURS_PER_WEEK, line_dash="dot",
+                                  line_color=col_ev, line_width=1, opacity=0.4,
                                   annotation_text="W" if amts[0]>0 else "DWJ",
-                                  annotation_font=dict(size=8,color=col_ev))
-            fig_cpk.update_layout(**CHART_BG, height=380,
+                                  annotation_font=dict(size=8, color=col_ev))
+            fig_cpk.update_layout(**make_chart_bg(), height=380,
                 xaxis_title="Time (Week)", yaxis_title="Plasma concentration (µg/L)",
                 legend=LEGEND_STYLE)
             st.plotly_chart(fig_cpk, use_container_width=True)
@@ -727,11 +742,10 @@ with tab_custom:
                     name=c_lbl,line=dict(color="#7c3aed",width=2.5),
                     hovertemplate="Week: %{x:.1f}<br>ΔBW: %{y:.2f}%<extra></extra>"))
                 fig_cbw.add_hline(y=0,line_dash="dot",line_color="#94a3b8",line_width=1.2)
-                fig_cbw.update_layout(**CHART_BG,height=300,
-                    xaxis_title="Time (Week)",yaxis_title="ΔBW (%)",showlegend=False)
-                st.plotly_chart(fig_cbw,use_container_width=True)
+                fig_cbw.update_layout(**make_chart_bg(), height=300,
+                    xaxis_title="Time (Week)", yaxis_title="ΔBW (%)", showlegend=False)
+                st.plotly_chart(fig_cbw, use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
-
             with cc2:
                 st.markdown('<div class="chart-card">', unsafe_allow_html=True)
                 st.markdown('<div class="sec-hdr">⚠️ GI 이상반응률 (%)</div>', unsafe_allow_html=True)
@@ -739,10 +753,10 @@ with tab_custom:
                 fig_cgi.add_trace(go.Scatter(x=t_wk_c[::s_c],y=cr['GI_total'][::s_c],
                     name=c_lbl,line=dict(color="#7c3aed",width=2.5),
                     hovertemplate="Week: %{x:.1f}<br>GI AE: %{y:.1f}%<extra></extra>"))
-                fig_cgi.update_layout(**CHART_BG,height=300,
-                    xaxis_title="Time (Week)",yaxis_title="GI AE Total (%)",showlegend=False)
+                fig_cgi.update_layout(**make_chart_bg(), height=300,
+                    xaxis_title="Time (Week)", yaxis_title="GI AE Total (%)", showlegend=False)
                 fig_cgi.update_yaxes(range=[0,100])
-                st.plotly_chart(fig_cgi,use_container_width=True)
+                st.plotly_chart(fig_cgi, use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
             wp_c = calc_window(cr['t_h'],cr['C_ugL'],cr['BW_pct'],cr['GI_total'],c_obs,c_tau)
@@ -753,11 +767,11 @@ with tab_custom:
                     f'<span class="window-badge">t={c_obs:.0f}h ~ {c_obs+c_tau:.0f}h</span></div>',
                     unsafe_allow_html=True)
                 r1,r2,r3,r4,r5 = st.columns(5)
-                r1.metric("Cmax (µg/L)",   f"{wp_c['Cmax']:.2f}")
-                r2.metric("Tmax (h)",       f"{wp_c['Tmax']:.1f}")
+                r1.metric("Cmax (µg/L)",    f"{wp_c['Cmax']:.2f}")
+                r2.metric("Tmax (h)",        f"{wp_c['Tmax']:.1f}")
                 r3.metric("AUCτ (µg·h/L)", f"{wp_c['AUCtau']:.0f}")
-                r4.metric("Cavg (µg/L)",   f"{wp_c['Cavg']:.4f}")
-                r5.metric("ΔBW τ (%)",     f"{wp_c['dBW']:.2f}")
+                r4.metric("Cavg (µg/L)",    f"{wp_c['Cavg']:.4f}")
+                r5.metric("ΔBW τ (%)",      f"{wp_c['dBW']:.2f}")
                 st.markdown('</div>', unsafe_allow_html=True)
 
 # Model Info
@@ -785,6 +799,6 @@ st.markdown(f"""
             padding:12px 0;margin-top:12px;background:#ffffff;
             border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.05)'>
   🐷 Minipig PK → Human 예측 · Phoenix NLME Validated ·
-  Taeheon Kim, Ph.D. · 2026-02-19 · v7.0 · 현재 배수: {multiplier}×
+  Taeheon Kim, Ph.D. · 2026-02-19 · v8.0 · 현재 배수: {multiplier}×
 </div>
 """, unsafe_allow_html=True)
