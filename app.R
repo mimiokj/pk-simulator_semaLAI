@@ -1,571 +1,649 @@
-# ============================================================
-# PK/PD/Safety Simulation Shiny App — bslib Modern UI
-# DWJ1691 (TMDD) + Wegovy (Semaglutide) - Integrated Model
-# Demo Version - Placeholder Parameters
-# ============================================================
-
-library(shiny)
-library(bslib)
-library(bsicons)
-library(deSolve)
-library(ggplot2)
-library(plotly)
-library(dplyr)
-library(tidyr)
-library(DT)
+import streamlit as st
+import numpy as np
+from scipy.integrate import odeint
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import pandas as pd
 
 # ============================================================
-# 1. MODEL PARAMETERS
+# PAGE CONFIG
 # ============================================================
-
-default_params <- list(
-  sema_ka   = 0.02,
-  sema_CL   = 0.066,
-  sema_V1   = 3.5,
-  sema_Q    = 0.12,
-  sema_V2   = 7.0,
-  sema_F    = 0.89,
-  dwj_ka    = 0.008,
-  dwj_F     = 0.75,
-  dwj_CL    = 0.010,
-  dwj_V1    = 3.0,
-  dwj_Q     = 0.05,
-  dwj_V2    = 6.0,
-  dwj_kon   = 0.091,
-  dwj_koff  = 0.001,
-  dwj_kint  = 0.005,
-  dwj_ksyn  = 1.0,
-  dwj_kdeg  = 0.05,
-  bw_base   = 100,
-  bw_kin    = 0.0001,
-  bw_kout   = 0.0001,
-  bw_Emax_s = 0.8,
-  bw_EC50_s = 50,
-  bw_Emax_d = 0.6,
-  bw_EC50_d = 20,
-  gi_E0     = 0.05,
-  gi_Emax   = 0.95,
-  gi_EC50   = 80,
-  gi_hill   = 1.5
+st.set_page_config(
+    page_title="DWJ1691 + Wegovy PK/PD Simulator",
+    page_icon="💊",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # ============================================================
-# 2. ODE SYSTEM
+# CUSTOM CSS — Dark Academic Style
 # ============================================================
+st.markdown("""
+<style>
+    /* Base dark theme */
+    .stApp { background-color: #0f1117; }
 
-pkpd_ode <- function(time, state, parms) {
-  with(as.list(c(state, parms)), {
-    dA_sema_depot <- -ka_s * A_sema_depot
-    dA_sema_c     <- ka_s * F_s * A_sema_depot -
-                     (CL_s/V1_s + Q_s/V1_s) * A_sema_c +
-                     (Q_s/V2_s) * A_sema_p
-    dA_sema_p     <- (Q_s/V1_s) * A_sema_c - (Q_s/V2_s) * A_sema_p
-    C_sema_ugL    <- (A_sema_c / V1_s) * 1000
-
-    C_dwj_free    <- A_dwj_c / V1_d
-    dA_dwj_depot  <- -ka_d * A_dwj_depot
-    dA_dwj_c      <- ka_d * F_d * A_dwj_depot -
-                     (CL_d/V1_d) * A_dwj_c -
-                     (Q_d/V1_d)  * A_dwj_c +
-                     (Q_d/V2_d)  * A_dwj_p -
-                     kon * C_dwj_free * R_free * V1_d +
-                     koff * RC * V1_d
-    dA_dwj_p      <- (Q_d/V1_d) * A_dwj_c - (Q_d/V2_d) * A_dwj_p
-    dR_free       <- ksyn - kdeg * R_free - kon * C_dwj_free * R_free + koff * RC
-    dRC           <- kon * C_dwj_free * R_free - koff * RC - kint * RC
-    C_dwj_ugL     <- C_dwj_free * 1000
-
-    IS   <- Emax_s * C_sema_ugL / (EC50_s + C_sema_ugL)
-    ID   <- Emax_d * C_dwj_ugL  / (EC50_d + C_dwj_ugL)
-    Icomb <- 1 - (1 - IS) * (1 - ID)
-    dBW  <- kin_bw * (1 - Icomb) - kout_bw * BW
-
-    C_pk  <- C_sema_ugL + 0.5 * C_dwj_ugL
-    GI_rate <- E0_gi + (Emax_gi - E0_gi) * C_pk^hill_gi /
-               (EC50_gi^hill_gi + C_pk^hill_gi)
-
-    list(c(dA_sema_depot, dA_sema_c, dA_sema_p,
-           dA_dwj_depot,  dA_dwj_c,  dA_dwj_p,
-           dR_free, dRC, dBW),
-         C_sema_ugL = C_sema_ugL,
-         C_dwj_ugL  = C_dwj_ugL,
-         GI_rate    = GI_rate)
-  })
-}
-
-# ============================================================
-# 3. SIMULATION HELPERS
-# ============================================================
-
-build_events <- function(schedule) {
-  events <- lapply(schedule, function(ev) {
-    data.frame(var=ev$state_var, time=ev$times_h,
-               value=ev$dose_mg, method="add")
-  })
-  df <- do.call(rbind, events)
-  df[order(df$time), ]
-}
-
-sema_weekly <- function(start_day, n_weeks, dose_mg) {
-  list(drug="semaglutide",
-       dose_mg = dose_mg * 1000,
-       times_h = seq(start_day*24, (start_day+(n_weeks-1)*7)*24, by=7*24),
-       state_var="A_sema_depot")
-}
-
-dwj_monthly <- function(start_day, n_months, dose_mg) {
-  list(drug="DWJ1691",
-       dose_mg = dose_mg * 1000,
-       times_h = seq(start_day*24, (start_day+(n_months-1)*28)*24, by=28*24),
-       state_var="A_dwj_depot")
-}
-
-make_cohort <- function(cohort_id, dwj_dose_mg=10) {
-  switch(cohort_id,
-    "Reference" = list(
-      sema_weekly(0,4,0.25), sema_weekly(28,4,0.50),
-      sema_weekly(56,4,1.00), sema_weekly(84,4,1.70),
-      sema_weekly(112,4,2.40)
-    ),
-    "Cohort I (W-W-T-W-W)" = list(
-      sema_weekly(0,4,0.25), sema_weekly(28,4,0.50),
-      dwj_monthly(56,1,dwj_dose_mg),
-      sema_weekly(84,4,1.70), sema_weekly(112,4,2.40)
-    ),
-    "Cohort II (W-W-W-T-W)" = list(
-      sema_weekly(0,4,0.25), sema_weekly(28,4,0.50),
-      sema_weekly(56,4,1.00), dwj_monthly(84,1,dwj_dose_mg),
-      sema_weekly(112,4,2.40)
-    ),
-    "Cohort III (W-W-W-W-T)" = list(
-      sema_weekly(0,4,0.25), sema_weekly(28,4,0.50),
-      sema_weekly(56,4,1.00), sema_weekly(84,4,1.70),
-      dwj_monthly(112,1,dwj_dose_mg)
-    )
-  )
-}
-
-run_simulation <- function(cohort_schedule, params, sim_days=175) {
-  p <- params
-  parms <- c(
-    ka_s=p$sema_ka, CL_s=p$sema_CL, V1_s=p$sema_V1,
-    Q_s=p$sema_Q,   V2_s=p$sema_V2, F_s=p$sema_F,
-    ka_d=p$dwj_ka,  CL_d=p$dwj_CL,  V1_d=p$dwj_V1,
-    Q_d=p$dwj_Q,    V2_d=p$dwj_V2,  F_d=p$dwj_F,
-    kon=p$dwj_kon,  koff=p$dwj_koff, kint=p$dwj_kint,
-    ksyn=p$dwj_ksyn, kdeg=p$dwj_kdeg,
-    kin_bw=p$bw_kin, kout_bw=p$bw_kout,
-    Emax_s=p$bw_Emax_s, EC50_s=p$bw_EC50_s,
-    Emax_d=p$bw_Emax_d, EC50_d=p$bw_EC50_d,
-    E0_gi=p$gi_E0, Emax_gi=p$gi_Emax,
-    EC50_gi=p$gi_EC50, hill_gi=p$gi_hill
-  )
-  R0 <- p$dwj_ksyn / p$dwj_kdeg
-  state0 <- c(A_sema_depot=0, A_sema_c=0, A_sema_p=0,
-               A_dwj_depot=0,  A_dwj_c=0,  A_dwj_p=0,
-               R_free=R0, RC=0, BW=p$bw_base)
-  evts <- build_events(cohort_schedule)
-  times <- seq(0, sim_days*24, by=1)
-  out <- ode(y=state0, times=times, func=pkpd_ode, parms=parms,
-             events=list(data=evts), method="lsoda")
-  df <- as.data.frame(out)
-  df$time_weeks <- df$time / (24*7)
-  df
-}
-
-# ============================================================
-# 4. THEME & COLORS
-# ============================================================
-
-app_theme <- bs_theme(
-  version    = 5,
-  bootswatch = "litera",
-  primary    = "#2166ac",
-  success    = "#1a9641",
-  danger     = "#d73027",
-  warning    = "#e6a817",
-  base_font  = font_google("Inter"),
-  heading_font = font_google("Inter"),
-  "border-radius" = "0.5rem",
-  "card-border-color" = "#e0e4ea"
-) |>
-  bs_add_rules("
-    .sidebar { background: #f8fafc !important; border-right: 1px solid #e0e4ea; }
-    .card { box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
-    .card-header { font-weight: 600; font-size: 0.85rem;
-                   letter-spacing: 0.03em; text-transform: uppercase;
-                   background: #f8fafc; border-bottom: 1px solid #e0e4ea; }
-    .value-box { border-radius: 0.5rem; }
-    .nav-pills .nav-link.active { background-color: #2166ac; }
-    .param-section { background: #f8fafc; border-radius: 0.5rem;
-                     padding: 12px; margin-bottom: 8px; }
-    .param-section h6 { font-size: 0.75rem; font-weight: 600;
-                        text-transform: uppercase; letter-spacing: 0.05em;
-                        color: #6c757d; margin-bottom: 10px; }
-    .shiny-notification { border-radius: 0.5rem; }
-    body { background: #f0f4f8; }
-    .main-content { padding: 1.2rem; }
-  ")
-
-cohort_colors <- c(
-  "Reference"               = "#888888",
-  "Cohort I (W-W-T-W-W)"   = "#2166ac",
-  "Cohort II (W-W-W-T-W)"  = "#1a9641",
-  "Cohort III (W-W-W-W-T)" = "#d73027"
-)
-
-# ============================================================
-# 5. UI
-# ============================================================
-
-ui <- page_sidebar(
-  theme = app_theme,
-  title = tags$span(
-    tags$img(src="https://www.r-project.org/logo/Rlogo.svg",
-             height="22px", style="margin-right:8px; vertical-align:middle;"),
-    "DWJ1691 + Wegovy  |  PK/PD Simulator",
-    style = "font-size:1rem; font-weight:600; color:#1e293b;"
-  ),
-
-  # ---- SIDEBAR ----
-  sidebar = sidebar(
-    width = 280,
-    bg = "#f8fafc",
-
-    # Cohort selector
-    div(class="param-section",
-      tags$h6("Cohort Selection"),
-      checkboxGroupInput("cohorts", NULL,
-        choices  = names(cohort_colors),
-        selected = names(cohort_colors)
-      )
-    ),
-
-    # DWJ1691 dose
-    div(class="param-section",
-      tags$h6("DWJ1691 Dose"),
-      sliderInput("dwj_dose", "Monthly SC dose (mg)",
-                  min=1, max=50, value=10, step=1, ticks=FALSE)
-    ),
-
-    # Simulation length
-    div(class="param-section",
-      tags$h6("Simulation"),
-      sliderInput("sim_weeks", "Duration (weeks)",
-                  min=12, max=36, value=25, step=1, ticks=FALSE)
-    ),
-
-    hr(style="margin:8px 0; border-color:#e0e4ea;"),
-
-    actionButton("run_sim", "Run Simulation",
-                 icon = icon("play-circle"),
-                 class = "btn-primary w-100 fw-semibold"),
-
-    br(),
-
-    # Download
-    downloadButton("dl_csv", "Download CSV",
-                   class = "btn-outline-secondary w-100 btn-sm")
-  ),
-
-  # ---- MAIN CONTENT ----
-  div(class="main-content",
-
-    # KPI row
-    layout_columns(
-      col_widths = c(3,3,3,3),
-      value_box(
-        title = "Semaglutide C\u2098\u2090\u2093",
-        value = textOutput("kpi_scmax", inline=TRUE),
-        showcase = bs_icon("arrow-up-circle-fill"),
-        theme = "primary", height = "100px"
-      ),
-      value_box(
-        title = "DWJ1691 C\u2098\u2090\u2093",
-        value = textOutput("kpi_dcmax", inline=TRUE),
-        showcase = bs_icon("arrow-up-circle-fill"),
-        theme = "danger", height = "100px"
-      ),
-      value_box(
-        title = "Max BW loss",
-        value = textOutput("kpi_bw", inline=TRUE),
-        showcase = bs_icon("activity"),
-        theme = "success", height = "100px"
-      ),
-      value_box(
-        title = "Peak GI AE rate",
-        value = textOutput("kpi_gi", inline=TRUE),
-        showcase = bs_icon("exclamation-triangle-fill"),
-        theme = "warning", height = "100px"
-      )
-    ),
-
-    br(),
-
-    # Tab panels for charts
-    navset_card_pill(
-      id = "main_tabs",
-
-      nav_panel("PK Profile",
-        icon = bs_icon("graph-up"),
-        card_body(
-          p(class="text-muted", style="font-size:0.8rem; margin-bottom:4px;",
-            "Plasma concentration over time — solid: Semaglutide, dashed: DWJ1691"),
-          plotlyOutput("pk_plot", height="380px")
-        )
-      ),
-
-      nav_panel("Body Weight",
-        icon = bs_icon("person"),
-        card_body(
-          plotlyOutput("bw_plot", height="380px")
-        )
-      ),
-
-      nav_panel("GI Safety",
-        icon = bs_icon("shield-exclamation"),
-        card_body(
-          plotlyOutput("gi_plot", height="380px")
-        )
-      ),
-
-      nav_panel("Combined View",
-        icon = bs_icon("grid"),
-        card_body(
-          layout_columns(
-            col_widths = c(12),
-            plotlyOutput("pk_plot2",  height="240px"),
-          ),
-          layout_columns(
-            col_widths = c(6,6),
-            plotlyOutput("bw_plot2",  height="220px"),
-            plotlyOutput("gi_plot2",  height="220px")
-          )
-        )
-      ),
-
-      nav_panel("PK Summary Table",
-        icon = bs_icon("table"),
-        card_body(
-          DTOutput("pk_table")
-        )
-      ),
-
-      nav_panel("Parameters",
-        icon = bs_icon("sliders"),
-        card_body(
-          layout_columns(
-            col_widths = c(6,6),
-
-            # Wegovy PK
-            card(
-              card_header("Wegovy (Semaglutide) PK"),
-              card_body(
-                numericInput("sema_CL","CL (L/h)",   value=0.066, step=0.001, width="100%"),
-                numericInput("sema_V1","V1 (L)",     value=3.5,   step=0.1,   width="100%"),
-                numericInput("sema_ka","ka (h⁻¹)",  value=0.02,  step=0.001, width="100%"),
-                numericInput("sema_F", "F (0–1)",    value=0.89,  step=0.01,  width="100%")
-              )
-            ),
-
-            # DWJ1691 PK
-            card(
-              card_header("DWJ1691 PK — TMDD"),
-              card_body(
-                numericInput("dwj_CL",  "CL (L/h)",          value=0.010, step=0.001, width="100%"),
-                numericInput("dwj_V1",  "V1 (L)",            value=3.0,   step=0.1,   width="100%"),
-                numericInput("dwj_kon", "kon (L/nmol/h)",    value=0.091, step=0.001, width="100%"),
-                numericInput("dwj_koff","koff (h⁻¹)",       value=0.001, step=0.0001,width="100%"),
-                numericInput("dwj_kint","kint (h⁻¹)",       value=0.005, step=0.001, width="100%"),
-                numericInput("dwj_ksyn","R synthesis (nmol/L/h)", value=1.0, step=0.1, width="100%")
-              )
-            ),
-
-            # PD
-            card(
-              card_header("Body Weight PD"),
-              card_body(
-                numericInput("bw_Emax_s","Emax Sema",          value=0.8, step=0.05, width="100%"),
-                numericInput("bw_EC50_s","EC50 Sema (µg/L)",   value=50,  step=5,    width="100%"),
-                numericInput("bw_Emax_d","Emax DWJ1691",       value=0.6, step=0.05, width="100%"),
-                numericInput("bw_EC50_d","EC50 DWJ1691 (µg/L)",value=20,  step=5,    width="100%")
-              )
-            ),
-
-            # Safety
-            card(
-              card_header("GI AE Safety Model"),
-              card_body(
-                numericInput("gi_E0",   "Baseline GI rate", value=0.05, step=0.01, width="100%"),
-                numericInput("gi_Emax", "Max GI rate",      value=0.95, step=0.05, width="100%"),
-                numericInput("gi_EC50", "EC50 (µg/L)",      value=80,   step=5,    width="100%"),
-                numericInput("gi_hill", "Hill coeff.",      value=1.5,  step=0.1,  width="100%")
-              )
-            )
-          )
-        )
-      )
-    )
-  )
-)
-
-# ============================================================
-# 6. SERVER
-# ============================================================
-
-server <- function(input, output, session) {
-
-  get_params <- reactive({
-    p <- default_params
-    p$sema_CL    <- input$sema_CL
-    p$sema_V1    <- input$sema_V1
-    p$sema_ka    <- input$sema_ka
-    p$sema_F     <- input$sema_F
-    p$dwj_CL     <- input$dwj_CL
-    p$dwj_V1     <- input$dwj_V1
-    p$dwj_kon    <- input$dwj_kon
-    p$dwj_koff   <- input$dwj_koff
-    p$dwj_kint   <- input$dwj_kint
-    p$dwj_ksyn   <- input$dwj_ksyn
-    p$bw_Emax_s  <- input$bw_Emax_s
-    p$bw_EC50_s  <- input$bw_EC50_s
-    p$bw_Emax_d  <- input$bw_Emax_d
-    p$bw_EC50_d  <- input$bw_EC50_d
-    p$gi_E0      <- input$gi_E0
-    p$gi_Emax    <- input$gi_Emax
-    p$gi_EC50    <- input$gi_EC50
-    p$gi_hill    <- input$gi_hill
-    p
-  })
-
-  sim_data <- eventReactive(input$run_sim, {
-    req(input$cohorts)
-    withProgress(message="Running ODE simulation…", value=0, {
-      results <- lapply(input$cohorts, function(coh) {
-        incProgress(1/length(input$cohorts), detail=coh)
-        sched <- make_cohort(coh, dwj_dose_mg=input$dwj_dose)
-        df    <- run_simulation(sched, get_params(),
-                                sim_days=input$sim_weeks*7)
-        df$cohort <- coh
-        df
-      })
-    })
-    bind_rows(results)
-  }, ignoreNULL=FALSE)
-
-  # Auto-run on startup
-  observe({ if(is.null(sim_data())) shinyjs::click("run_sim") })
-
-  # ---- Shared plot theme ----
-  pk_theme <- function() {
-    theme_minimal(base_size=12, base_family="sans") +
-    theme(
-      panel.grid.minor = element_blank(),
-      panel.grid.major = element_line(color="#e8ecf0", linewidth=0.4),
-      axis.title       = element_text(size=11, color="#4a5568"),
-      legend.position  = "top",
-      legend.text      = element_text(size=10),
-      plot.background  = element_rect(fill="white", color=NA)
-    )
-  }
-
-  make_pk_plot <- function(df) {
-    df_long <- df |>
-      select(cohort, time_weeks, C_sema_ugL, C_dwj_ugL) |>
-      pivot_longer(c(C_sema_ugL, C_dwj_ugL), names_to="drug", values_to="conc") |>
-      mutate(drug = ifelse(drug=="C_sema_ugL","Semaglutide","DWJ1691"))
-    p <- ggplot(df_long, aes(x=time_weeks, y=conc, color=cohort, linetype=drug)) +
-      geom_line(linewidth=0.9, alpha=0.85) +
-      scale_color_manual(values=cohort_colors, name="Cohort") +
-      scale_linetype_manual(values=c("Semaglutide"="solid","DWJ1691"="dashed"), name="Drug") +
-      labs(x="Time (week)", y="Plasma concentration (µg/L)") +
-      pk_theme()
-    ggplotly(p) |> layout(hovermode="x unified",
-                           legend=list(orientation="h", y=1.12))
-  }
-
-  make_bw_plot <- function(df, bw0=100) {
-    p <- ggplot(df, aes(x=time_weeks, y=(BW-bw0)/bw0*100, color=cohort)) +
-      geom_line(linewidth=1, alpha=0.85) +
-      scale_color_manual(values=cohort_colors, name="Cohort") +
-      labs(x="Time (week)", y="Body weight change (%BW)") +
-      pk_theme()
-    ggplotly(p) |> layout(hovermode="x unified",
-                           legend=list(orientation="h", y=1.12))
-  }
-
-  make_gi_plot <- function(df) {
-    p <- ggplot(df, aes(x=time_weeks, y=GI_rate*100, color=cohort)) +
-      geom_line(linewidth=1, alpha=0.85) +
-      scale_color_manual(values=cohort_colors, name="Cohort") +
-      labs(x="Time (week)", y="GI AE rate (%)") +
-      ylim(0,100) +
-      pk_theme()
-    ggplotly(p) |> layout(hovermode="x unified",
-                           legend=list(orientation="h", y=1.12))
-  }
-
-  output$pk_plot  <- renderPlotly({ req(sim_data()); make_pk_plot(sim_data()) })
-  output$bw_plot  <- renderPlotly({ req(sim_data()); make_bw_plot(sim_data()) })
-  output$gi_plot  <- renderPlotly({ req(sim_data()); make_gi_plot(sim_data()) })
-  output$pk_plot2 <- renderPlotly({ req(sim_data()); make_pk_plot(sim_data()) })
-  output$bw_plot2 <- renderPlotly({ req(sim_data()); make_bw_plot(sim_data()) })
-  output$gi_plot2 <- renderPlotly({ req(sim_data()); make_gi_plot(sim_data()) })
-
-  # ---- KPI outputs ----
-  output$kpi_scmax <- renderText({
-    req(sim_data())
-    paste0(round(max(sim_data()$C_sema_ugL, na.rm=TRUE), 1), " µg/L")
-  })
-  output$kpi_dcmax <- renderText({
-    req(sim_data())
-    paste0(round(max(sim_data()$C_dwj_ugL, na.rm=TRUE), 1), " µg/L")
-  })
-  output$kpi_bw <- renderText({
-    req(sim_data())
-    bw0 <- default_params$bw_base
-    paste0(round(min((sim_data()$BW - bw0)/bw0*100, na.rm=TRUE), 1), "%")
-  })
-  output$kpi_gi <- renderText({
-    req(sim_data())
-    paste0(round(max(sim_data()$GI_rate*100, na.rm=TRUE), 1), "%")
-  })
-
-  # ---- PK Summary Table ----
-  output$pk_table <- renderDT({
-    req(sim_data())
-    bw0 <- default_params$bw_base
-    tbl <- sim_data() |>
-      group_by(Cohort = cohort) |>
-      summarise(
-        `Sema Cmax (µg/L)`  = round(max(C_sema_ugL, na.rm=TRUE), 2),
-        `Sema Tmax (wk)`    = round(time_weeks[which.max(C_sema_ugL)], 1),
-        `DWJ Cmax (µg/L)`   = round(max(C_dwj_ugL, na.rm=TRUE), 2),
-        `DWJ Tmax (wk)`     = round(time_weeks[which.max(C_dwj_ugL)], 1),
-        `Max BW loss (%)`   = round(min((BW-bw0)/bw0*100, na.rm=TRUE), 2),
-        `Peak GI AE (%)`    = round(max(GI_rate*100, na.rm=TRUE), 1),
-        .groups = "drop"
-      )
-    datatable(tbl,
-              options = list(dom="t", pageLength=10, scrollX=TRUE),
-              rownames = FALSE,
-              class    = "table table-striped table-hover table-sm") |>
-      formatStyle("Cohort", fontWeight="600") |>
-      formatStyle("Max BW loss (%)",
-                  color = styleInterval(c(-10,-5), c("#d73027","#e6a817","#1a9641")))
-  })
-
-  # ---- CSV Download ----
-  output$dl_csv <- downloadHandler(
-    filename = function() paste0("pkpd_sim_", Sys.Date(), ".csv"),
-    content  = function(file) {
-      write.csv(sim_data(), file, row.names=FALSE)
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background-color: #161b27;
+        border-right: 1px solid #2a3040;
     }
-  )
+    [data-testid="stSidebar"] .stMarkdown h3 {
+        color: #7eb8f7;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 0.3rem;
+    }
+
+    /* KPI cards */
+    .kpi-card {
+        background: linear-gradient(135deg, #1a2035 0%, #1e2640 100%);
+        border: 1px solid #2a3550;
+        border-radius: 12px;
+        padding: 18px 20px;
+        text-align: center;
+        transition: border-color 0.2s;
+    }
+    .kpi-card:hover { border-color: #4a6090; }
+    .kpi-label {
+        font-size: 0.72rem;
+        color: #8892a4;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 6px;
+    }
+    .kpi-value {
+        font-size: 1.8rem;
+        font-weight: 700;
+        line-height: 1.1;
+    }
+    .kpi-unit {
+        font-size: 0.72rem;
+        color: #6b7585;
+        margin-top: 4px;
+    }
+    .kpi-blue  { color: #60a5fa; }
+    .kpi-red   { color: #f87171; }
+    .kpi-green { color: #34d399; }
+    .kpi-amber { color: #fbbf24; }
+
+    /* Section headers */
+    .section-header {
+        font-size: 0.72rem;
+        font-weight: 700;
+        color: #7eb8f7;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        border-bottom: 1px solid #2a3550;
+        padding-bottom: 6px;
+        margin-bottom: 12px;
+        margin-top: 8px;
+    }
+
+    /* Chart container */
+    .chart-container {
+        background: #161b27;
+        border: 1px solid #2a3040;
+        border-radius: 12px;
+        padding: 16px;
+    }
+
+    /* Table styling */
+    .dataframe {
+        background-color: #161b27 !important;
+        color: #c8d0e0 !important;
+    }
+
+    /* Divider */
+    hr { border-color: #2a3040 !important; }
+
+    /* Streamlit elements */
+    .stSlider > div > div > div { background: #2a3550; }
+    .stCheckbox > label { color: #c8d0e0 !important; }
+    .stButton > button {
+        background: #2166ac;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        width: 100%;
+        padding: 0.5rem;
+        transition: background 0.2s;
+    }
+    .stButton > button:hover { background: #1a5490; }
+
+    /* Title area */
+    .main-title {
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: #e2e8f0;
+        letter-spacing: -0.01em;
+    }
+    .main-subtitle {
+        font-size: 0.85rem;
+        color: #64748b;
+        margin-top: 2px;
+        margin-bottom: 20px;
+    }
+    .badge {
+        display: inline-block;
+        background: #1e3a5f;
+        color: #60a5fa;
+        font-size: 0.68rem;
+        font-weight: 600;
+        padding: 2px 10px;
+        border-radius: 20px;
+        border: 1px solid #2a4a7a;
+        margin-left: 8px;
+        vertical-align: middle;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================
+# PLOTLY DARK THEME
+# ============================================================
+PLOT_LAYOUT = dict(
+    paper_bgcolor="#161b27",
+    plot_bgcolor="#0f1117",
+    font=dict(family="Inter, sans-serif", color="#c8d0e0", size=12),
+    xaxis=dict(
+        gridcolor="#1e2640", gridwidth=0.5,
+        linecolor="#2a3550", tickcolor="#2a3550",
+        title_font=dict(size=12, color="#8892a4")
+    ),
+    yaxis=dict(
+        gridcolor="#1e2640", gridwidth=0.5,
+        linecolor="#2a3550", tickcolor="#2a3550",
+        title_font=dict(size=12, color="#8892a4")
+    ),
+    margin=dict(l=50, r=20, t=60, b=50),
+    hovermode="x unified"
+)
+
+COHORT_COLORS = {
+    "Reference":               "#94a3b8",
+    "Cohort I (W-W-T-W-W)":   "#60a5fa",
+    "Cohort II (W-W-W-T-W)":  "#34d399",
+    "Cohort III (W-W-W-W-T)": "#f87171",
 }
 
 # ============================================================
-# 7. RUN
+# MODEL PARAMETERS — Phoenix NLME fixef estimates
+# Modeler: Taeheon Kim, Ph.D. (2026-02-19)
+# Units: Dose(µg), A1(µg), C = A1/V (µg/L), V(mL→L*1000), CL(L/h), rate(h-1)
+# Note: V(L) from Phoenix → V_ug = V * 1000 (mL) to get C in µg/L
+#       e.g. V=25L → V_eff=25000 mL, C(µg/L) = A1(µg)/25(L) = A1/V directly
+#       because 1 µg / 1 L = 1 µg/L  ✓  (V kept in L, dose in µg)
+# ============================================================
+DEFAULT = dict(
+    # Shared 1-cpt PK
+    V        = 25.0,    # Central volume (L)
+    Cl       = 3.5,     # Clearance (L/h)
+    # Wegovy SC absorption
+    Ka       = 5.2,     # Wegovy fast-depot absorption rate (h-1)
+    ka_SC    = 1.0,     # SC R-compartment absorption rate (h-1)
+    F_SC     = 0.9,     # SC bioavailability
+    # DWJ1691 LAI absorption
+    Scale_LAI = 0.2,    # LAI dose scaling factor
+    F_DR     = 0.2,     # Delayed release fraction
+    kdr      = 1.0,     # Transit rate for delayed release (h-1)
+    # BW PD — Indirect Response, sigmoidal Imax
+    bw_base  = 100.0,   # Baseline body weight (kg)
+    Imax     = 0.21,    # Maximum inhibition (0-1)
+    IC50     = 55.0,    # IC50 (µg/L)
+    Gamma    = 0.5,     # Hill coefficient
+    kout     = 0.00039, # BW turnover rate (h-1)
+    # GI AE — Simple Emax
+    E0_AE    = 0.4833,  # Baseline GI AE (0-1)
+    Emax_AE  = 0.2867,  # Max drug-induced GI AE
+    EC50_AE  = 32.98,   # EC50 for GI AE (µg/L)
+)
+
+# ============================================================
+# ODE SYSTEM — Phoenix NLME PML (Taeheon Kim, Ph.D.)
+#
+# State variables:
+#   A1            : Central compartment (µg)
+#   FR            : Fast-release LAI depot (µg)
+#   DR/DR1/DR2/DR3: 3-transit delayed-release chain (µg)
+#   R             : Wegovy SC absorption depot (µg)
+#   BW            : Body weight (kg)
+#
+# Derived:
+#   C (µg/L) = A1(µg) / V(L)   ← units consistent ✓
+#   F_FR = F_SC - F_DR
+#   kin  = kout * Current_Baseline
+# ============================================================
+def pkpd_ode(y, t, p, dose_fn_sema, dose_fn_lai):
+    A1, FR, DR, DR1, DR2, DR3, R, BW = y
+
+    V   = p['V']
+    Cl  = p['Cl']
+    Ka  = p['Ka']
+    ka_SC = p['ka_SC']
+    kdr = p['kdr']
+
+    # Concentration (µg/L) = A1(µg) / V(L)
+    C = A1 / V
+
+    # Fractions
+    F_SC = p['F_SC']
+    F_DR = p['F_DR']
+    F_FR = F_SC - F_DR          # fast-release fraction
+
+    Scale_LAI = p['Scale_LAI']
+
+    # --- PK ODEs (Phoenix PML translated) ---
+    # Central compartment: receives FR (fast LAI), DR3 (delayed LAI), R (SC)
+    dA1  = -(Cl * C) + (Ka * FR) + (kdr * DR3) + (ka_SC * R)
+
+    # Fast-release LAI depot
+    dFR  = -(FR * Ka)
+
+    # 3-transit delayed-release chain
+    dDR  = -(DR * kdr)
+    dDR1 = (DR * kdr)  - (DR1 * kdr)
+    dDR2 = (DR1 * kdr) - (DR2 * kdr)
+    dDR3 = (DR2 * kdr) - (DR3 * kdr)
+
+    # Wegovy SC depot (R compartment)
+    dR   = -(R * ka_SC) + dose_fn_sema(t)
+
+    # --- PD: Body Weight (Indirect Response, sigmoidal Imax) ---
+    Imax  = p['Imax']
+    IC50  = p['IC50']
+    Gamma = p['Gamma']
+    kout  = p['kout']
+
+    E = (Imax * C**Gamma) / (IC50**Gamma + C**Gamma + 1e-12)
+    Current_Baseline = 100.0 - (6.0 * (1.0 - np.exp(-0.0001 * t)))
+    kin = kout * Current_Baseline
+    dBW = kin * (1.0 - E) - kout * BW
+
+    return [dA1, dFR, dDR, dDR1, dDR2, dDR3, dR, dBW]
+
+# ============================================================
+# DOSING HELPERS
+# ============================================================
+def make_pulsed_fn(times_h, amts, dur=0.5):
+    """Bolus dose approximated as short infusion."""
+    pairs = list(zip(times_h, amts))
+    def fn(t):
+        for (dt, amt) in pairs:
+            if dt <= t < dt + dur:
+                return amt / dur
+        return 0.0
+    return fn
+
+def build_sema_doses(skip_block=None):
+    """Wegovy once-weekly SC, 5-step escalation (4wk each block).
+    Dose in µg (e.g. 0.25mg = 250µg).
+    """
+    levels_mg = [0.25, 0.5, 1.0, 1.7, 2.4]   # mg
+    times_h, amts = [], []
+    for block in range(5):
+        if block == skip_block:
+            continue
+        dose_ug = levels_mg[block] * 1000 * DEFAULT['F_SC']  # mg→µg, bioavail
+        for w in range(4):
+            t = (block * 28 + w * 7) * 24    # hours
+            times_h.append(t)
+            amts.append(dose_ug)
+    return times_h, amts
+
+def build_lai_doses(skip_block, dwj_dose_ug):
+    """DWJ1691 LAI once-monthly SC injection.
+    dwj_dose_ug: dose in µg
+    Splits into FR (fast) and DR (delayed) fractions via Scale_LAI.
+    """
+    if skip_block is None:
+        return [], [], [], []
+
+    t_h       = skip_block * 28 * 24
+    Scale     = DEFAULT['Scale_LAI']
+    F_DR      = DEFAULT['F_DR']
+    F_SC      = DEFAULT['F_SC']
+    F_FR      = F_SC - F_DR
+
+    amt_FR    = dwj_dose_ug * Scale * F_FR   # fast-release (µg)
+    amt_DR    = dwj_dose_ug * Scale * F_DR   # delayed-release (µg)
+
+    return [t_h], [amt_FR], [t_h], [amt_DR]
+
+COHORT_SKIP = {
+    "Reference":               None,
+    "Cohort I (W-W-T-W-W)":   2,
+    "Cohort II (W-W-W-T-W)":  3,
+    "Cohort III (W-W-W-W-T)": 4,
+}
+
+# ============================================================
+# SIMULATION
+# ============================================================
+@st.cache_data(show_spinner=False)
+def run_simulation(cohorts_tuple, dwj_dose_mg, sim_weeks,
+                   IC50_slider, EC50_AE_slider, kout_slider):
+    p = dict(
+        V        = DEFAULT['V'],
+        Cl       = DEFAULT['Cl'],
+        Ka       = DEFAULT['Ka'],
+        ka_SC    = DEFAULT['ka_SC'],
+        F_SC     = DEFAULT['F_SC'],
+        Scale_LAI= DEFAULT['Scale_LAI'],
+        F_DR     = DEFAULT['F_DR'],
+        kdr      = DEFAULT['kdr'],
+        bw_base  = DEFAULT['bw_base'],
+        Imax     = DEFAULT['Imax'],
+        IC50     = IC50_slider,
+        Gamma    = DEFAULT['Gamma'],
+        kout     = kout_slider,
+        E0_AE    = DEFAULT['E0_AE'],
+        Emax_AE  = DEFAULT['Emax_AE'],
+        EC50_AE  = EC50_AE_slider,
+    )
+
+    # Initial conditions: all depots empty, BW at baseline
+    y0 = [0.0,   # A1
+          0.0,   # FR
+          0.0,   # DR
+          0.0,   # DR1
+          0.0,   # DR2
+          0.0,   # DR3
+          0.0,   # R (Wegovy SC depot)
+          DEFAULT['bw_base']]  # BW
+
+    t_end = sim_weeks * 7 * 24   # hours
+    t_vec = np.linspace(0, t_end, sim_weeks * 7 * 24 + 1)
+
+    results = {}
+    for coh in cohorts_tuple:
+        skip = COHORT_SKIP[coh]
+
+        # Wegovy SC doses → R compartment via dose_fn
+        st_h, sa = build_sema_doses(skip)
+        fn_sema  = make_pulsed_fn(st_h, sa)
+
+        # DWJ1691 LAI doses → split into FR and DR at t=0 of injection
+        fr_h, fr_a, dr_h, dr_a = build_lai_doses(skip, dwj_dose)
+        fn_fr = make_pulsed_fn(fr_h, fr_a)
+        fn_dr = make_pulsed_fn(dr_h, dr_a)
+
+        # Wrap into single LAI function used inside ODE for FR/DR injection
+        # (FR and DR depots receive their respective fractions at dose time)
+        def make_lai_fn(ffr, fdr):
+            def fn(t):
+                return ffr(t), fdr(t)
+            return fn
+        fn_lai = make_lai_fn(fn_fr, fn_dr)
+
+        # Custom ODE wrapper to inject FR and DR separately
+        def ode_wrap(y, t, p=p, fn_sema=fn_sema,
+                     fn_fr=fn_fr, fn_dr=fn_dr):
+            A1, FR, DR, DR1, DR2, DR3, R, BW = y
+            V     = p['V'];  Cl = p['Cl']
+            Ka    = p['Ka']; ka_SC = p['ka_SC']; kdr = p['kdr']
+            C     = A1 / V
+            F_SC  = p['F_SC']; F_DR = p['F_DR']
+
+            # Dose injections
+            dose_R  = fn_sema(t)   # → R depot
+            dose_FR = fn_fr(t)     # → FR depot
+            dose_DR = fn_dr(t)     # → DR depot
+
+            dA1  = -(Cl * C) + (Ka * FR) + (kdr * DR3) + (ka_SC * R)
+            dFR  = -(FR * Ka)  + dose_FR
+            dDR  = -(DR * kdr) + dose_DR
+            dDR1 = (DR * kdr)  - (DR1 * kdr)
+            dDR2 = (DR1 * kdr) - (DR2 * kdr)
+            dDR3 = (DR2 * kdr) - (DR3 * kdr)
+            dR   = -(R * ka_SC) + dose_R
+
+            Imax  = p['Imax'];  IC50 = p['IC50']; Gamma = p['Gamma']
+            kout  = p['kout']
+            E = (Imax * C**Gamma) / (IC50**Gamma + C**Gamma + 1e-12)
+            Current_Baseline = 100.0 - (6.0 * (1.0 - np.exp(-0.0001 * t)))
+            kin = kout * Current_Baseline
+            dBW = kin * (1.0 - E) - kout * BW
+
+            return [dA1, dFR, dDR, dDR1, dDR2, dDR3, dR, dBW]
+
+        sol = odeint(ode_wrap, y0, t_vec, mxstep=10000)
+
+        C_ugL  = sol[:, 0] / p['V']                      # µg/L
+        BW_arr = sol[:, 7]
+        GI     = p['E0_AE'] + p['Emax_AE'] * C_ugL / \
+                 (p['EC50_AE'] + C_ugL + 1e-12)
+
+        results[coh] = dict(
+            t_weeks = t_vec / (7 * 24),
+            C_ugL   = C_ugL,
+            BW_pct  = (BW_arr - DEFAULT['bw_base']) / DEFAULT['bw_base'] * 100,
+            GI_rate = GI * 100,
+        )
+    return results
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+with st.sidebar:
+    st.markdown("### 💊 DWJ1691 + Wegovy")
+    st.markdown("**PK/PD Simulator** `Demo v1.0`")
+    st.markdown("---")
+
+    st.markdown('<div class="section-header">Cohort Selection</div>',
+                unsafe_allow_html=True)
+    sel = {}
+    for coh, col in COHORT_COLORS.items():
+        sel[coh] = st.checkbox(coh, value=True,
+                               key=f"chk_{coh}")
+
+    st.markdown("---")
+    st.markdown('<div class="section-header">DWJ1691 Dose</div>',
+                unsafe_allow_html=True)
+    dwj_dose = st.slider("Monthly SC dose (µg)", 100, 10000, 1000, 100)
+
+    st.markdown('<div class="section-header">Simulation</div>',
+                unsafe_allow_html=True)
+    sim_weeks = st.slider("Duration (weeks)", 12, 36, 25, 1)
+
+    st.markdown('<div class="section-header">PD Parameters</div>',
+                unsafe_allow_html=True)
+    IC50_slider    = st.slider("IC50 — BW (mg/L)",   10, 150,
+                                int(DEFAULT['IC50']),  5)
+    EC50_AE_slider = st.slider("EC50 — GI AE (mg/L)", 5, 100,
+                                int(DEFAULT['EC50_AE']), 5)
+    kout_slider    = st.slider("kout × 10⁻⁴ (h⁻¹)",  1, 20,
+                                int(DEFAULT['kout']*10000), 1)
+    kout_val = kout_slider * 1e-4
+
+    st.markdown("---")
+    run = st.button("▶  Run Simulation")
+
+# ============================================================
+# MAIN AREA
 # ============================================================
 
-shinyApp(ui, server)
+# Title
+st.markdown("""
+<div class="main-title">
+  DWJ1691 + Wegovy &nbsp;
+  <span class="badge">PK/PD/Safety</span>
+  <span class="badge">Demo</span>
+</div>
+<div class="main-subtitle">
+  Integrated pharmacokinetic · pharmacodynamic · safety simulation
+</div>
+""", unsafe_allow_html=True)
+
+# Run simulation
+active_cohorts = [c for c, v in sel.items() if v]
+
+if not active_cohorts:
+    st.warning("Please select at least one cohort.")
+    st.stop()
+
+with st.spinner("Running ODE simulation..."):
+    results = run_simulation(
+        tuple(active_cohorts), dwj_dose, sim_weeks,
+        IC50_slider, EC50_AE_slider, kout_val
+    )
+
+# ---- KPI Cards ----
+all_C  = np.concatenate([r['C_ugL']  for r in results.values()])
+all_bw = np.concatenate([r['BW_pct'] for r in results.values()])
+all_gi = np.concatenate([r['GI_rate'] for r in results.values()])
+
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.markdown(f"""
+    <div class="kpi-card">
+      <div class="kpi-label">C<sub>max</sub> (combined)</div>
+      <div class="kpi-value kpi-blue">{np.max(all_C):.1f}</div>
+      <div class="kpi-unit">µg/L</div>
+    </div>""", unsafe_allow_html=True)
+with k2:
+    st.markdown(f"""
+    <div class="kpi-card">
+      <div class="kpi-label">IC50 / EC50<sub>AE</sub></div>
+      <div class="kpi-value kpi-red">{IC50_slider} / {EC50_AE_slider}</div>
+      <div class="kpi-unit">mg/L</div>
+    </div>""", unsafe_allow_html=True)
+with k3:
+    st.markdown(f"""
+    <div class="kpi-card">
+      <div class="kpi-label">Max BW Loss</div>
+      <div class="kpi-value kpi-green">{np.min(all_bw):.1f}%</div>
+      <div class="kpi-unit">body weight</div>
+    </div>""", unsafe_allow_html=True)
+with k4:
+    st.markdown(f"""
+    <div class="kpi-card">
+      <div class="kpi-label">Peak GI AE Rate</div>
+      <div class="kpi-value kpi-amber">{np.max(all_gi):.1f}%</div>
+      <div class="kpi-unit">adverse event</div>
+    </div>""", unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ---- PK Profile ----
+st.markdown('<div class="section-header">PK Profile — Plasma Concentration</div>',
+            unsafe_allow_html=True)
+
+fig_pk = go.Figure()
+for coh, r in results.items():
+    col = COHORT_COLORS[coh]
+    tw  = r['t_weeks']
+    fig_pk.add_trace(go.Scatter(
+        x=tw[::6], y=r['C_ugL'][::6],
+        name=coh,
+        line=dict(color=col, width=2, dash='solid'),
+        hovertemplate="%{y:.2f} µg/L"
+    ))
+
+fig_pk.update_layout(
+    **PLOT_LAYOUT,
+    height=340,
+    xaxis_title="Time (Week)",
+    yaxis_title="Plasma concentration (µg/L)",
+    legend=dict(
+        bgcolor="#1a2035", bordercolor="#2a3550", borderwidth=1,
+        orientation="h", yanchor="bottom", y=1.02,
+        xanchor="left", x=0, font=dict(size=10)
+    )
+)
+st.plotly_chart(fig_pk, use_container_width=True)
+
+# ---- BW + GI side by side ----
+col_bw, col_gi = st.columns(2)
+
+with col_bw:
+    st.markdown('<div class="section-header">Body Weight Change (%BW)</div>',
+                unsafe_allow_html=True)
+    fig_bw = go.Figure()
+    for coh, r in results.items():
+        fig_bw.add_trace(go.Scatter(
+            x=r['t_weeks'][::6], y=r['BW_pct'][::6],
+            name=coh,
+            line=dict(color=COHORT_COLORS[coh], width=2),
+            hovertemplate="%{y:.2f}%"
+        ))
+    fig_bw.update_layout(
+        **PLOT_LAYOUT, height=280,
+        xaxis_title="Time (Week)",
+        yaxis_title="BW change (%)",
+        showlegend=False
+    )
+    st.plotly_chart(fig_bw, use_container_width=True)
+
+with col_gi:
+    st.markdown('<div class="section-header">GI Adverse Event Rate</div>',
+                unsafe_allow_html=True)
+    fig_gi = go.Figure()
+    for coh, r in results.items():
+        fig_gi.add_trace(go.Scatter(
+            x=r['t_weeks'][::6], y=r['GI_rate'][::6],
+            name=coh,
+            line=dict(color=COHORT_COLORS[coh], width=2),
+            hovertemplate="%{y:.1f}%"
+        ))
+    fig_gi.update_layout(
+        **PLOT_LAYOUT, height=280,
+        xaxis_title="Time (Week)",
+        yaxis_title="GI AE rate (%)",
+        yaxis_range=[0, 100],
+        showlegend=False
+    )
+    st.plotly_chart(fig_gi, use_container_width=True)
+
+# ---- PK Summary Table ----
+st.markdown('<div class="section-header">PK Summary Table</div>',
+            unsafe_allow_html=True)
+
+rows = []
+for coh, r in results.items():
+    tw = r['t_weeks']
+    rows.append({
+        "Cohort":           coh,
+        "Cmax (µg/L)":     round(float(np.max(r['C_ugL'])), 2),
+        "Tmax (wk)":       round(float(tw[np.argmax(r['C_ugL'])]), 1),
+        "Clast (µg/L)":    round(float(r['C_ugL'][-1]), 2),
+        "Max BW loss (%)": round(float(np.min(r['BW_pct'])), 2),
+        "Peak GI AE (%)":  round(float(np.max(r['GI_rate'])), 1),
+    })
+
+df = pd.DataFrame(rows)
+st.dataframe(
+    df,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Cohort":          st.column_config.TextColumn(width="large"),
+        "Cmax (µg/L)":     st.column_config.NumberColumn(format="%.2f"),
+        "Clast (µg/L)":    st.column_config.NumberColumn(format="%.2f"),
+        "Max BW loss (%)": st.column_config.NumberColumn(format="%.2f"),
+        "Peak GI AE (%)":  st.column_config.NumberColumn(format="%.1f"),
+    }
+)
+
+# CSV Download
+csv = df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "⬇ Download Summary CSV",
+    csv,
+    file_name="pkpd_summary.csv",
+    mime="text/csv"
+)
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align:center; color:#3a4560; font-size:0.75rem; padding:8px 0'>
+  PK/PD Simulator · Phoenix NLME Model (Taeheon Kim, Ph.D. · 2026-02-19) ·
+  1-Cpt Multiple Absorption (LAI + SC) · Indirect Response BW · Simple Emax GI AE
+</div>
+""", unsafe_allow_html=True)
