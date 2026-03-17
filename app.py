@@ -69,7 +69,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: #ffffff; border-radius: 12px; padding: 18px 20px;
     margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
-.sec-hdr { font-size: 0.68rem; font-weight: 700; color: #2166ac; text-transform: uppercase; letter-spacing: 0.09em; margin-bottom: 2px; }
+.sec-hdr { font-size: 0.68rem; font-weight: 700; color: #2166ac;
+    text-transform: uppercase; letter-spacing: 0.09em; margin-bottom: 2px; }
 hr { border-color: #2d4a6e !important; }
 .stButton > button {
     background: linear-gradient(135deg,#2166ac,#1d4ed8); color: white; border: none;
@@ -84,18 +85,14 @@ hr { border-color: #2d4a6e !important; }
 CHART_BG = dict(
     paper_bgcolor="#ffffff", plot_bgcolor="#fafbfc",
     font=dict(family="Inter, sans-serif", color="#334155", size=12),
-    xaxis=dict(
-        gridcolor="#f1f5f9", gridwidth=1, linecolor="#e2e8f0",
-        tickcolor="#e2e8f0", zeroline=False,
-        title_font=dict(size=11, color="#64748b"),
-        tickfont=dict(size=10, color="#94a3b8")
-    ),
-    yaxis=dict(
-        gridcolor="#f1f5f9", gridwidth=1, linecolor="#e2e8f0",
-        tickcolor="#e2e8f0", zeroline=False,
-        title_font=dict(size=11, color="#64748b"),
-        tickfont=dict(size=10, color="#94a3b8")
-    ),
+    xaxis=dict(gridcolor="#f1f5f9", gridwidth=1, linecolor="#e2e8f0",
+               tickcolor="#e2e8f0", zeroline=False,
+               title_font=dict(size=11, color="#64748b"),
+               tickfont=dict(size=10, color="#94a3b8")),
+    yaxis=dict(gridcolor="#f1f5f9", gridwidth=1, linecolor="#e2e8f0",
+               tickcolor="#e2e8f0", zeroline=False,
+               title_font=dict(size=11, color="#64748b"),
+               tickfont=dict(size=10, color="#94a3b8")),
     margin=dict(l=60, r=30, t=30, b=55),
     hovermode="x unified",
     hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0",
@@ -129,43 +126,40 @@ COHORT_CONFIG = {
 SIM_WEEKS = 28
 
 # ============================================================
-# MODEL PARAMETERS
+# MODEL PARAMETERS — Phoenix NLME fixef (Taeheon Kim, Ph.D.)
 # ============================================================
-# Phoenix NLME 추정치 — 단위 체계:
-#   Dose   : mg
-#   Amount : µg  (dose × 1000)
+# 단위 체계:
+#   Dose   : mg  → ×1000 → µg (amount 단위)
+#   Amount : µg
 #   V      : L
 #   C      : µg/L  (= Amount / V)
 #   CL     : L/h
-#   IC50   : µg/L  (55 µg/L)
-#   EC50   : µg/L  (32.98 µg/L)
-# → Dose(mg) × 1000 = Amount(µg), C = Amount/V (µg/L)
+#   IC50   : µg/L
+#   EC50   : µg/L
 # ============================================================
 P = dict(
-    V         = 12.4,      # L
-    Cl        = 0.0475,    # L/h
-    Ka        = 0.1026,    # h⁻¹  FR → A1
-    ka_SC     = 0.0296,    # h⁻¹  R  → A1
-    F_SC      = 0.9,       # Wegovy bioavailability (고정)
-    Scale_LAI = 0.2459,    # DWJ1691 LAI scaling
-    F_DR      = 0.429,     # delayed fraction → F_FR = 0.9 - 0.429 = 0.471
-    kdr       = 0.02,      # h⁻¹
-    BW0       = 100.0,     # kg
-    Imax      = 0.21,
+    V         = 12.4,      # L        (updated)
+    Cl        = 0.0475,    # L/h      (updated)
+    Ka        = 0.1026,    # h⁻¹      (updated) FR → A1
+    ka_SC     = 0.0296,    # h⁻¹      (updated) R  → A1
+    F_SC      = 0.9,       # –        Wegovy bioavailability (fixed)
+    Scale_LAI = 0.2459,    # –        (updated)
+    F_DR      = 0.429,     # –        (updated) F_FR = 0.9 - 0.429 = 0.471
+    kdr       = 0.02,      # h⁻¹      (updated)
+    BW0       = 100.0,     # kg       baseline (fixed)
+    Imax      = 0.21,      # –
     IC50      = 55.0,      # µg/L
-    Gamma     = 0.5,
+    Gamma     = 0.5,       # –
     kout      = 0.00039,   # h⁻¹
-    E0_AE     = 0.4833,
-    Emax_AE   = 0.2867,
+    E0_AE     = 0.4833,    # –
+    Emax_AE   = 0.2867,    # –
     EC50_AE   = 32.98,     # µg/L
 )
 
 # ============================================================
-# ODE
-# ============================================================
+# ODE — Phoenix PML 직번역
 # State: [A1, FR, DR, DR1, DR2, DR3, R, BW]
-# 단위: Amount(µg), C = A1/V (µg/L)
-# PML deriv 블록 직번역
+# A1~DR3, R: µg  /  C = A1/V: µg/L
 # ============================================================
 def build_ode(p, ev_R, ev_FR, ev_DR):
     def bolus(events, t, dur=0.5):
@@ -177,11 +171,8 @@ def build_ode(p, ev_R, ev_FR, ev_DR):
 
     def ode(t, y):
         A1, FR, DR, DR1, DR2, DR3, R, BW = [max(v, 0.0) for v in y]
+        C = A1 / p['V']   # µg/L
 
-        # C (µg/L) = Amount(µg) / V(L)
-        C = A1 / p['V']
-
-        # PK (PML deriv 직번역)
         dA1  = -(p['Cl'] * C) + (p['ka_SC'] * R) + (FR * p['Ka']) + (DR3 * p['kdr'])
         dFR  = -(FR * p['Ka'])   + bolus(ev_FR, t)
         dDR  = -(DR * p['kdr'])  + bolus(ev_DR, t)
@@ -190,7 +181,7 @@ def build_ode(p, ev_R, ev_FR, ev_DR):
         dDR3 =  (DR2 * p['kdr']) - (DR3 * p['kdr'])
         dR   = -(R * p['ka_SC']) + bolus(ev_R, t)
 
-        # BW PD — C(µg/L), IC50(µg/L) 단위 일치
+        # BW PD: C(µg/L), IC50(µg/L)
         E    = (p['Imax'] * C**p['Gamma']) / \
                (p['IC50']**p['Gamma'] + C**p['Gamma'] + 1e-15)
         CB   = 100.0 - 6.0 * (1.0 - np.exp(-0.0001 * t))
@@ -203,10 +194,6 @@ def build_ode(p, ev_R, ev_FR, ev_DR):
 # DOSE BUILDERS
 # ============================================================
 def build_wegovy_events(skip_block=None):
-    """
-    Wegovy dose(mg) × 1000 → µg
-    × F_SC → R depot에 주입
-    """
     events = []
     for blk in range(5):
         if blk == skip_block:
@@ -218,18 +205,13 @@ def build_wegovy_events(skip_block=None):
     return events
 
 def build_dwj_events(dwj_block, dwj_dose_mg):
-    """
-    DWJ1691 dose(mg) × 1000 → µg
-    FR depot : µg × Scale_LAI × F_FR
-    DR depot : µg × Scale_LAI × F_DR
-    """
     if dwj_block is None or dwj_dose_mg <= 0:
         return [], []
     t_h    = dwj_block * 28 * 24.0
-    amt_ug = dwj_dose_mg * 1000.0               # mg → µg
-    F_FR   = P['F_SC'] - P['F_DR']              # 0.7
-    amt_FR = amt_ug * P['Scale_LAI'] * F_FR     # µg into FR
-    amt_DR = amt_ug * P['Scale_LAI'] * P['F_DR']# µg into DR
+    amt_ug = dwj_dose_mg * 1000.0
+    F_FR   = P['F_SC'] - P['F_DR']              # 0.471
+    amt_FR = amt_ug * P['Scale_LAI'] * F_FR
+    amt_DR = amt_ug * P['Scale_LAI'] * P['F_DR']
     return [(t_h, amt_FR)], [(t_h, amt_DR)]
 
 # ============================================================
@@ -241,7 +223,7 @@ def simulate_cohort(coh_name, p):
     ev_FR, ev_DR = build_dwj_events(cfg['dwj_block'], cfg['dwj_dose'])
     ode          = build_ode(p, ev_R, ev_FR, ev_DR)
 
-    t_end  = SIM_WEEKS * 7 * 24.0
+    t_end  = SIM_WEEKS * 7 * 24.0        # 4704 h
     t_eval = np.linspace(0, t_end, int(t_end) + 1)
     y0     = [0.0] * 7 + [p['BW0']]
 
@@ -253,13 +235,13 @@ def simulate_cohort(coh_name, p):
         return None
 
     t_h    = sol.t
-    C_ugL  = np.clip(sol.y[0], 0.0, None) / p['V']  # µg/L
+    t_wk   = t_h / (7.0 * 24.0)                 # hours → weeks
+    C_ugL  = np.clip(sol.y[0], 0.0, None) / p['V']
     BW     = np.clip(sol.y[7], 0.0, None)
     BW_pct = (BW - p['BW0']) / p['BW0'] * 100.0
     GI     = np.clip(
         p['E0_AE'] + p['Emax_AE'] * C_ugL / (p['EC50_AE'] + C_ugL + 1e-15),
         0.0, 1.0) * 100.0
-    t_wk   = t_h / (7 * 24.0)   # 시간축: Week
 
     return dict(t_h=t_h, t_wk=t_wk, C_ugL=C_ugL, BW_pct=BW_pct, GI=GI)
 
@@ -361,20 +343,17 @@ with k2:
     st.markdown(f"""<div class="kpi-card kpi-red">
       <div class="kpi-label">DWJ1691 Doses</div>
       <div class="kpi-value cv-red" style="font-size:1.35rem">8 / 13.6 / 19.2</div>
-      <div class="kpi-unit">mg · Cohort I / II / III</div></div>""",
-                unsafe_allow_html=True)
+      <div class="kpi-unit">mg · Cohort I / II / III</div></div>""", unsafe_allow_html=True)
 with k3:
     st.markdown(f"""<div class="kpi-card kpi-green">
       <div class="kpi-label">Max BW Loss</div>
       <div class="kpi-value cv-green">{np.min(all_bw):.1f}%</div>
-      <div class="kpi-unit">from baseline (BW₀ = 100 kg)</div></div>""",
-                unsafe_allow_html=True)
+      <div class="kpi-unit">from baseline (BW₀ = 100 kg)</div></div>""", unsafe_allow_html=True)
 with k4:
     st.markdown(f"""<div class="kpi-card kpi-orange">
       <div class="kpi-label">Peak GI AE Rate</div>
       <div class="kpi-value cv-orange">{np.max(all_gi):.1f}%</div>
-      <div class="kpi-unit">adverse event</div></div>""",
-                unsafe_allow_html=True)
+      <div class="kpi-unit">adverse event</div></div>""", unsafe_allow_html=True)
 
 st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
@@ -401,7 +380,7 @@ vline_col = {
 for coh in active:
     cfg = COHORT_CONFIG[coh]
     if cfg['dwj_block'] is not None:
-        t_v = cfg['dwj_block'] * 4.0   # weeks
+        t_v = float(cfg['dwj_block']) * 4.0
         fig_pk.add_vline(
             x=t_v, line_dash="dash",
             line_color=vline_col.get(coh, "#888"),
@@ -523,9 +502,9 @@ with st.expander("📋 Model Parameters (Phoenix NLME fixef)"):
         st.markdown(f"- CL = {P['Cl']} L/h")
         st.markdown(f"- Ka (FR→A1) = {P['Ka']} h⁻¹")
         st.markdown(f"- ka_SC (R→A1) = {P['ka_SC']} h⁻¹")
-        st.markdown(f"- F_SC = {P['F_SC']}")
+        st.markdown(f"- F_SC = {P['F_SC']}  (Wegovy bioavail)")
         st.markdown(f"- Scale_LAI = {P['Scale_LAI']}")
-        st.markdown(f"- F_DR = {P['F_DR']}  →  F_FR = {P['F_SC']-P['F_DR']:.1f}")
+        st.markdown(f"- F_DR = {P['F_DR']}  →  F_FR = {P['F_SC']-P['F_DR']:.3f}")
         st.markdown(f"- kdr = {P['kdr']} h⁻¹")
     with c2:
         st.markdown("**BW PD — Indirect Response**")
@@ -542,11 +521,11 @@ with st.expander("📋 Model Parameters (Phoenix NLME fixef)"):
         st.markdown(f"- EC50 = {P['EC50_AE']} µg/L")
         st.markdown("---")
         st.markdown("**Unit Convention**")
-        st.markdown("- Dose: mg → ×1000 → µg")
+        st.markdown("- Dose(mg) × 1000 → Amount(µg)")
         st.markdown("- C = Amount(µg) / V(L) = µg/L")
-        st.markdown(f"- Wegovy R: dose×1000×{P['F_SC']} µg")
-        st.markdown(f"- DWJ FR: dose×1000×{P['Scale_LAI']}×{P['F_SC']-P['F_DR']:.1f} µg")
-        st.markdown(f"- DWJ DR: dose×1000×{P['Scale_LAI']}×{P['F_DR']} µg")
+        st.markdown(f"- Wegovy R: dose×1000×{P['F_SC']}")
+        st.markdown(f"- DWJ FR: dose×1000×{P['Scale_LAI']}×{P['F_SC']-P['F_DR']:.3f}")
+        st.markdown(f"- DWJ DR: dose×1000×{P['Scale_LAI']}×{P['F_DR']}")
 
 st.markdown("""
 <div style='text-align:center;color:#94a3b8;font-size:0.72rem;
