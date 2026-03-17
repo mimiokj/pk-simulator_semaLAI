@@ -4,19 +4,7 @@ from scipy.integrate import solve_ivp, trapezoid
 import plotly.graph_objects as go
 import pandas as pd
 import datetime
-```
-
----
-
-**requirements.txt도 업데이트하세요:**
-```
-streamlit>=1.32.0
-numpy>=1.24.0
-scipy>=1.11.0
-plotly>=5.18.0
-pandas>=2.0.0
-reportlab>=4.0.0
-kaleido>=0.2.1
+import io
 
 st.set_page_config(
     page_title="DWJ1691 Clinical PK/PD Simulator",
@@ -29,8 +17,6 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background-color: #f0f4f8; }
-
-/* ── 사이드바 ── */
 [data-testid="stSidebar"] {
     background: linear-gradient(180deg, #1e3a5f 0%, #1a3050 100%) !important;
 }
@@ -44,14 +30,9 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 [data-testid="stSidebar"] .stSlider p { color: #bfdbfe !important; font-size: 0.85rem !important; }
 [data-testid="stSidebar"] [data-testid="stTickBarMin"],
 [data-testid="stSidebar"] [data-testid="stTickBarMax"] { color: #93c5fd !important; }
-
-/* ── 메인 영역 슬라이더 레이블 ── */
 .stSlider > label, .stSlider > div > label { color: #1e293b !important; font-weight: 600 !important; }
-
-/* ── 탭 ── */
 .stTabs [data-baseweb="tab"] { font-size: 0.92rem; font-weight: 600; color: #334155 !important; }
 .stTabs [aria-selected="true"] { color: #1e40af !important; }
-
 .sb-logo { font-size: 1.1rem; font-weight: 700; color: #ffffff !important; }
 .sb-hdr {
     font-size: 0.68rem; font-weight: 700; color: #60a5fa !important;
@@ -128,9 +109,7 @@ hr { border-color: #2d4a6e !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Plotly 공통 테마 ──
-# 축 제목을 확실히 검정으로 고정하는 핵심:
-# update_layout 대신 fig.update_xaxes / fig.update_yaxes 로 별도 강제
+# ── Plotly axis config ──
 AXIS_CFG = dict(
     gridcolor="#e2e8f0", gridwidth=1,
     linecolor="#475569", tickcolor="#475569", linewidth=1.5,
@@ -141,8 +120,7 @@ AXIS_CFG = dict(
 
 def make_chart_bg():
     return dict(
-        paper_bgcolor="#ffffff",
-        plot_bgcolor="#fafbfc",
+        paper_bgcolor="#ffffff", plot_bgcolor="#fafbfc",
         font=dict(family="Inter, sans-serif", color="#1e293b", size=13),
         margin=dict(l=70, r=30, t=50, b=65),
         hovermode="x unified",
@@ -151,15 +129,12 @@ def make_chart_bg():
     )
 
 def apply_axes(fig, x_title, y_title):
-    """축 제목/스타일을 update_xaxes/yaxes로 강제 적용 — 덮어씌움 방지"""
     fig.update_xaxes(title_text=x_title, **AXIS_CFG)
     fig.update_yaxes(title_text=y_title, **AXIS_CFG)
 
 LEGEND_STYLE = dict(
-    bgcolor="rgba(255,255,255,0.95)",
-    bordercolor="#cbd5e1", borderwidth=1,
-    orientation="h", yanchor="bottom", y=1.02,
-    xanchor="left", x=0,
+    bgcolor="rgba(255,255,255,0.95)", bordercolor="#cbd5e1", borderwidth=1,
+    orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
     font=dict(size=12, color="#1e293b")
 )
 
@@ -214,6 +189,9 @@ COHORT_WINDOWS = {
     "Cohort III (W-W-W-W-T)": {"t_dose": 2688.0, "wegovy_label": "2.4 mg 구간"},
 }
 
+# ============================================================
+# ODE
+# ============================================================
 def make_ode(p):
     def ode(t, y):
         A1,FR,DR,DR1,DR2,DR3,R,BW = [max(v,0.0) for v in y]
@@ -298,6 +276,250 @@ def calc_window(t_h, C_ugL, BW_pct, GI_total, t_start, tau):
     }
 
 # ============================================================
+# PDF REPORT
+# ============================================================
+def generate_pdf_report(results, rows_df, multiplier, obs_weeks,
+                        tau_h, ni_margin, fig_pk, fig_bw, fig_gi):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors as rlc
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table,
+        TableStyle, Image as RLImage, HRFlowable
+    )
+
+    buf   = io.BytesIO()
+    W, H  = A4
+    marg  = 18*mm
+
+    NAVY  = rlc.HexColor("#1e3a5f")
+    BLUE  = rlc.HexColor("#2166ac")
+    LGRAY = rlc.HexColor("#f1f5f9")
+    DGRAY = rlc.HexColor("#334155")
+    GREEN = rlc.HexColor("#16a34a")
+    RED   = rlc.HexColor("#dc2626")
+    WHITE = rlc.white
+
+    styles = getSampleStyleSheet()
+    sT  = ParagraphStyle("T",  parent=styles["Normal"], fontSize=15,
+                         textColor=WHITE, fontName="Helvetica-Bold")
+    sSb = ParagraphStyle("Sb", parent=styles["Normal"], fontSize=8.5,
+                         textColor=rlc.HexColor("#93c5fd"), fontName="Helvetica")
+    sH  = ParagraphStyle("H",  parent=styles["Normal"], fontSize=11,
+                         textColor=NAVY, fontName="Helvetica-Bold",
+                         spaceBefore=6, spaceAfter=3)
+    sN  = ParagraphStyle("N",  parent=styles["Normal"], fontSize=8.5,
+                         textColor=DGRAY, fontName="Helvetica", leading=12)
+    sSm = ParagraphStyle("Sm", parent=styles["Normal"], fontSize=7.5,
+                         textColor=DGRAY, fontName="Helvetica", leading=11)
+
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    def on_page(canv, doc):
+        canv.saveState()
+        canv.setFont("Helvetica", 7.5)
+        canv.setFillColor(rlc.HexColor("#94a3b8"))
+        canv.drawString(marg, 11*mm,
+            f"DWJ1691 PK/PD Simulator Report  |  {now_str}")
+        canv.drawRightString(W-marg, 11*mm, f"Page {doc.page}")
+        canv.restoreState()
+
+    doc   = SimpleDocTemplate(buf, pagesize=A4,
+                              leftMargin=marg, rightMargin=marg,
+                              topMargin=13*mm, bottomMargin=17*mm)
+    iw    = W - 2*marg   # inner width
+    story = []
+
+    # ── 헤더 배너 ──
+    hdr_content = [
+        [Paragraph("DWJ1691 + Wegovy &nbsp; PK/PD Simulation Report", sT)],
+        [Paragraph("Minipig PK → Human Prediction · Phoenix NLME · Taeheon Kim, Ph.D.", sSb)],
+    ]
+    hdr_tbl = Table(hdr_content, colWidths=[iw])
+    hdr_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), NAVY),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ("LEFTPADDING",   (0,0),(-1,-1), 14),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 14),
+    ]))
+    story.append(hdr_tbl)
+    story.append(Spacer(1, 4*mm))
+
+    # ── 설정 요약 ──
+    story.append(Paragraph("Simulation Settings", sH))
+    story.append(HRFlowable(width=iw, thickness=1, color=BLUE, spaceAfter=3))
+    cfg = [
+        [Paragraph("<b>Parameter</b>", sSm), Paragraph("<b>Value</b>", sSm)],
+        ["Dose Multiplier",             f"{multiplier}x (vs. Wegovy)"],
+        ["Cohort I Dose",               f"{1000*multiplier/1000:.1f} mg  ({1000*multiplier:,} ug)"],
+        ["Cohort II Dose",              f"{1700*multiplier/1000:.1f} mg  ({1700*multiplier:,} ug)"],
+        ["Cohort III Dose",             f"{2400*multiplier/1000:.1f} mg  ({2400*multiplier:,} ug)"],
+        ["Observation Window (tau)",    f"{obs_weeks} weeks  ({int(tau_h)} h)"],
+        ["Safety Cmax Threshold",       f"{ni_margin}x vs. Wegovy"],
+        ["Report Generated",            now_str],
+    ]
+    # wrap strings in Paragraph
+    cfg_p = []
+    for row in cfg:
+        cfg_p.append([Paragraph(str(c), sSm) for c in row])
+    cfg_tbl = Table(cfg_p, colWidths=[iw*0.44, iw*0.56])
+    cfg_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,0),  BLUE),
+        ("TEXTCOLOR",     (0,0),(-1,0),  WHITE),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [LGRAY, WHITE]),
+        ("GRID",          (0,0),(-1,-1), 0.3, rlc.HexColor("#e2e8f0")),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 7),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 7),
+    ]))
+    story.append(cfg_tbl)
+    story.append(Spacer(1, 4*mm))
+
+    # ── 차트 ──
+    story.append(Paragraph("PK/PD Profiles", sH))
+    story.append(HRFlowable(width=iw, thickness=1, color=BLUE, spaceAfter=3))
+
+    def fig_img(fig, w, h):
+        b = fig.to_image(format="png", width=int(w*2.2), height=int(h*2.2), scale=2)
+        return io.BytesIO(b)
+
+    try:
+        story.append(RLImage(fig_img(fig_pk, iw, 195), width=iw, height=195))
+        story.append(Spacer(1, 2*mm))
+        bw_io = fig_img(fig_bw, iw*0.5-3, 145)
+        gi_io = fig_img(fig_gi, iw*0.5-3, 145)
+        side = Table(
+            [[RLImage(bw_io, width=iw*0.5-3, height=145),
+              RLImage(gi_io, width=iw*0.5-3, height=145)]],
+            colWidths=[iw*0.5, iw*0.5]
+        )
+        side.setStyle(TableStyle([
+            ("LEFTPADDING",  (0,0),(-1,-1), 0),
+            ("RIGHTPADDING", (0,0),(-1,-1), 0),
+            ("TOPPADDING",   (0,0),(-1,-1), 0),
+            ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+        ]))
+        story.append(side)
+    except Exception as e:
+        story.append(Paragraph(f"[Chart image error: {str(e)[:100]}]", sSm))
+
+    story.append(Spacer(1, 4*mm))
+
+    # ── 결과 테이블 ──
+    story.append(Paragraph(
+        f"Observation Window Results  (tau = {obs_weeks} wk / {int(tau_h)} h)", sH))
+    story.append(HRFlowable(width=iw, thickness=1, color=BLUE, spaceAfter=3))
+
+    if rows_df is not None and len(rows_df) > 0:
+        cols = list(rows_df.columns)
+        n    = len(cols)
+        cw   = iw / n
+        hrow = [Paragraph(f"<b>{c}</b>", sSm) for c in cols]
+        tdata = [hrow]
+        for _, row in rows_df.iterrows():
+            tdata.append([Paragraph(str(v) if v is not None else "-", sSm)
+                          for v in row.values])
+
+        ts = [
+            ("BACKGROUND",    (0,0),(-1,0),  BLUE),
+            ("TEXTCOLOR",     (0,0),(-1,0),  WHITE),
+            ("GRID",          (0,0),(-1,-1), 0.3, rlc.HexColor("#e2e8f0")),
+            ("TOPPADDING",    (0,0),(-1,-1), 4),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
+            ("ALIGN",         (2,0),(-1,-1), "CENTER"),
+        ]
+        for i, (_, row) in enumerate(rows_df.iterrows(), start=1):
+            lbl = str(row.iloc[0])
+            if "Wegovy" in lbl and "Cohort" not in lbl:
+                ts.append(("BACKGROUND", (0,i),(-1,i), LGRAY))
+            else:
+                ts.append(("BACKGROUND", (0,i),(-1,i),
+                            rlc.HexColor("#eff6ff") if i%2==0 else WHITE))
+            last = str(row.iloc[-1])
+            if last == "✅":
+                ts.append(("TEXTCOLOR", (-1,i),(-1,i), GREEN))
+            elif last == "⚠️":
+                ts.append(("TEXTCOLOR", (-1,i),(-1,i), RED))
+
+        rtbl = Table(tdata, colWidths=[cw]*n, repeatRows=1)
+        rtbl.setStyle(TableStyle(ts))
+        story.append(rtbl)
+
+    story.append(Spacer(1, 4*mm))
+
+    # ── 파라미터 ──
+    story.append(Paragraph("Model Parameters (Phoenix NLME fixef)", sH))
+    story.append(HRFlowable(width=iw, thickness=1, color=BLUE, spaceAfter=3))
+
+    pdata = [
+        ["Parameter",    "Value",   "Unit"],
+        ["V",            "12.4",    "L"],
+        ["CL",           "0.0475",  "L/h"],
+        ["Ka (FR->A1)",  "0.1026",  "h-1"],
+        ["ka_SC (R->A1)","0.0296",  "h-1"],
+        ["F_SC",         "0.9",     "-"],
+        ["Scale_LAI",    "0.2459",  "-"],
+        ["F_DR",         "0.429",   "-"],
+        ["kdr",          "0.02",    "h-1"],
+        ["Imax",         "0.25",    "-"],
+        ["IC50",         "55.0",    "ug/L"],
+        ["kout",         "0.00039", "h-1"],
+        ["E0_AE",        "0.4833",  "-"],
+        ["Emax_AE",      "0.2867",  "-"],
+        ["EC50_AE",      "32.98",   "ug/L"],
+    ]
+    half  = len(pdata)//2 + 1
+    left  = pdata[:half]
+    right = pdata[half:]
+    while len(right) < len(left): right.append(["","",""])
+
+    def ptbl(data):
+        dp = [[Paragraph(str(c), sSm) for c in row] for row in data]
+        t  = Table(dp, colWidths=[iw*0.20, iw*0.09, iw*0.09])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),  rlc.HexColor("#e0e7ff")),
+            ("TEXTCOLOR",     (0,0),(-1,0),  NAVY),
+            ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1), [LGRAY, WHITE]),
+            ("TEXTCOLOR",     (0,1),(-1,-1), DGRAY),
+            ("GRID",          (0,0),(-1,-1), 0.3, rlc.HexColor("#e2e8f0")),
+            ("FONTSIZE",      (0,0),(-1,-1), 7.5),
+            ("TOPPADDING",    (0,0),(-1,-1), 3),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 3),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
+        ]))
+        return t
+
+    pr = Table([[ptbl(left), ptbl(right)]], colWidths=[iw*0.5-2, iw*0.5-2])
+    pr.setStyle(TableStyle([
+        ("LEFTPADDING",  (0,0),(-1,-1), 0),
+        ("RIGHTPADDING", (0,0),(-1,-1), 4),
+        ("TOPPADDING",   (0,0),(-1,-1), 0),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+    ]))
+    story.append(pr)
+    story.append(Spacer(1, 4*mm))
+
+    story.append(HRFlowable(width=iw, thickness=0.5,
+                            color=rlc.HexColor("#cbd5e1"), spaceAfter=3))
+    story.append(Paragraph(
+        "This report is generated from DWJ1691 PK/PD Simulator "
+        "(Minipig PK-based Human PK Prediction, Phoenix NLME). "
+        "For investigational use only.", sSm))
+
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+    buf.seek(0)
+    return buf.read()
+
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 with st.sidebar:
@@ -315,8 +537,7 @@ with st.sidebar:
     st.markdown('<hr style="border-color:#2d4a6e;margin:10px 0">', unsafe_allow_html=True)
     st.markdown('<div class="sb-hdr">시험약 용량 배수 / DOSE MULTIPLIER</div>',
                 unsafe_allow_html=True)
-    multiplier = st.slider("대조약(Wegovy) 대비 배수", 1, 16, 8, 1,
-                           label_visibility="visible")
+    multiplier = st.slider("대조약(Wegovy) 대비 배수", 1, 16, 8, 1)
 
     def fmt_dose(ug):
         return f"{ug*multiplier/1000:.1f} mg ({ug*multiplier:,} µg)"
@@ -335,10 +556,8 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.markdown(
         '<span style="font-size:0.76rem;color:#93c5fd;">'
-        'Cmax 배수 기준: 시험약 / 대조약</span>',
-        unsafe_allow_html=True)
-    ni_margin = st.slider("허용 Cmax 배수", 0.5, 5.0, 2.0, 0.25,
-                          label_visibility="visible")
+        'Cmax 배수 기준: 시험약 / 대조약</span>', unsafe_allow_html=True)
+    ni_margin = st.slider("허용 Cmax 배수", 0.5, 5.0, 2.0, 0.25)
 
     st.markdown('<hr style="border-color:#2d4a6e;margin:10px 0">', unsafe_allow_html=True)
     st.markdown(
@@ -356,6 +575,9 @@ tab_std, tab_custom = st.tabs([
     "⚙️ 커스텀 설계 (Custom Schedule)"
 ])
 
+# ============================================================
+# TAB 1 — 표준 시뮬레이션
+# ============================================================
 with tab_std:
     col_obs1, col_obs2 = st.columns([3,1])
     with col_obs1:
@@ -396,10 +618,10 @@ with tab_std:
         st.stop()
 
     with st.spinner("🔬 ODE 시뮬레이션 실행 중..."):
-        results = run_standard(tuple(active), multiplier, t_end, _ver="v9.0")
+        results = run_standard(tuple(active), multiplier, t_end, _ver="v10.0")
     results = {k:v for k,v in results.items() if v is not None}
     if not results:
-        st.error("시뮬레이션 오류가 발생했습니다."); st.stop()
+        st.error("시뮬레이션 오류."); st.stop()
 
     ref_r = results.get("Reference (Wegovy)")
 
@@ -420,12 +642,14 @@ with tab_std:
     all_bw = np.concatenate([r['BW_pct']  for r in results.values()])
     all_gi = np.concatenate([r['GI_total']for r in results.values()])
 
-    test_cmax = max((test_window[c]['Cmax'] for c in test_window if test_window[c]), default=0)
-    first_test = next((c for c in ["Cohort I (W-W-T-W-W)","Cohort II (W-W-W-T-W)","Cohort III (W-W-W-W-T)"]
-                       if c in ref_window and ref_window[c]), None)
+    test_cmax = max(
+        (test_window[c]['Cmax'] for c in test_window if test_window.get(c)), default=0)
+    first_test = next((c for c in ["Cohort I (W-W-T-W-W)","Cohort II (W-W-W-T-W)",
+                                    "Cohort III (W-W-W-W-T)"]
+                       if c in ref_window and ref_window.get(c)), None)
     ref_cmax_kpi = ref_window[first_test]['Cmax'] if first_test else None
-    cmax_ratio = test_cmax/ref_cmax_kpi if ref_cmax_kpi and test_cmax else 0
-    ni_ok = 0 < cmax_ratio <= ni_margin
+    cmax_ratio   = test_cmax/ref_cmax_kpi if ref_cmax_kpi and test_cmax else 0
+    ni_ok        = 0 < cmax_ratio <= ni_margin
 
     # KPI
     k1,k2,k3,k4,k5 = st.columns(5)
@@ -442,13 +666,13 @@ with tab_std:
           <div class="kpi-value cv-purple">{test_cmax:.1f}</div>
           <div class="kpi-unit">µg/L</div></div>""", unsafe_allow_html=True)
     with k3:
-        ratio_disp = f"{cmax_ratio:.2f}×" if cmax_ratio>0 else "—"
-        ni_icon    = "✅" if ni_ok else ("⚠️" if cmax_ratio>0 else "—")
+        ratio_disp = f"{cmax_ratio:.2f}x" if cmax_ratio>0 else "-"
+        ni_icon    = "✅" if ni_ok else ("⚠️" if cmax_ratio>0 else "-")
         ratio_col  = "cv-green" if ni_ok else "cv-red"
         card_col   = "green" if ni_ok else "red"
         st.markdown(f"""<div class="kpi-card kpi-{card_col}">
           <div class="kpi-label">vs. Wegovy C<sub>max</sub></div>
-          <div class="kpi-label-ko">허용 배수 기준 {ni_margin}×</div>
+          <div class="kpi-label-ko">허용 배수 기준 {ni_margin}x</div>
           <div class="kpi-value {ratio_col}">{ratio_disp}</div>
           <div class="kpi-unit">{ni_icon} 안전성 허용범위</div></div>""",
                     unsafe_allow_html=True)
@@ -457,7 +681,7 @@ with tab_std:
           <div class="kpi-label">Max BW Loss</div>
           <div class="kpi-label-ko">최대 체중 감소율</div>
           <div class="kpi-value cv-green">{np.min(all_bw):.1f}%</div>
-          <div class="kpi-unit">BW₀ = 100 kg 기준</div></div>""", unsafe_allow_html=True)
+          <div class="kpi-unit">BW0 = 100 kg 기준</div></div>""", unsafe_allow_html=True)
     with k5:
         st.markdown(f"""<div class="kpi-card kpi-orange">
           <div class="kpi-label">Peak GI AE</div>
@@ -491,8 +715,8 @@ with tab_std:
         if coh in shade_colors:
             t_s = COHORT_WINDOWS[coh]["t_dose"]/HOURS_PER_WEEK
             t_e = (COHORT_WINDOWS[coh]["t_dose"]+tau_h)/HOURS_PER_WEEK
-            fig_pk.add_vrect(x0=t_s,x1=t_e,
-                fillcolor=shade_colors[coh],line_width=0,
+            fig_pk.add_vrect(x0=t_s, x1=t_e,
+                fillcolor=shade_colors[coh], line_width=0,
                 annotation_text=f"{obs_weeks}wk obs",
                 annotation_position="top left",
                 annotation_font=dict(size=9,color=COHORT_COLORS[coh]))
@@ -511,7 +735,7 @@ with tab_std:
                              annotation_text=f"DWJ {lbl}",annotation_position="top",
                              annotation_font=dict(size=10,color=col))
     fig_pk.update_layout(**make_chart_bg(), height=440, legend=LEGEND_STYLE)
-    apply_axes(fig_pk, "Time (Week)", "Plasma concentration (µg/L)")
+    apply_axes(fig_pk,"Time (Week)","Plasma concentration (µg/L)")
     st.plotly_chart(fig_pk, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -531,7 +755,7 @@ with tab_std:
             ))
         fig_bw.add_hline(y=0,line_dash="dot",line_color="#94a3b8",line_width=1.2)
         fig_bw.update_layout(**make_chart_bg(),height=330,legend=LEGEND_STYLE)
-        apply_axes(fig_bw, "Time (Week)", "ΔBW (%) from BW₀=100kg")
+        apply_axes(fig_bw,"Time (Week)","ΔBW (%) from BW0=100kg")
         st.plotly_chart(fig_bw, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -548,7 +772,7 @@ with tab_std:
                 hovertemplate=f"<b>{SHORT_NAMES[coh]}</b><br>Week:%{{x:.1f}}<br>GI AE:%{{y:.1f}}%<extra></extra>"
             ))
         fig_gi.update_layout(**make_chart_bg(),height=330,legend=LEGEND_STYLE)
-        apply_axes(fig_gi, "Time (Week)", "GI AE Total (%)")
+        apply_axes(fig_gi,"Time (Week)","GI AE Total (%)")
         fig_gi.update_yaxes(range=[0,100])
         st.plotly_chart(fig_gi, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -574,51 +798,91 @@ with tab_std:
         if "Reference (Wegovy)" in results and rw:
             rows.append({
                 "구분":            ref_label,
-                "시험약 용량":     "— (대조약)",
-                "Cmax (µg/L)":    round(rw['Cmax'],  1),
+                "시험약 용량":     "- (대조약)",
+                "Cmax (ug/L)":    round(rw['Cmax'],  1),
                 "Tmax (h)":       round(rw['Tmax'],  1),
-                "AUCτ (µg·h/L)": round(rw['AUCtau'],0),
-                "Cavg (µg/L)":    round(rw['Cavg'],  3),
-                "ΔBW τ (%)":      round(rw['dBW'],   2),
+                "AUCt (ug·h/L)":  round(rw['AUCtau'],0),
+                "Cavg (ug/L)":    round(rw['Cavg'],  3),
+                "dBW t (%)":      round(rw['dBW'],   2),
                 "Peak GI (%)":    round(rw['peak_GI'],1),
-                "안전성 판정":     "—",
+                "Safety":         "-",
             })
-        if coh in results and coh in test_window and test_window[coh]:
+        if coh in results and coh in test_window and test_window.get(coh):
             tw = test_window[coh]
             ni_sym = "✅" if (rw and tw['Cmax']/rw['Cmax']<=ni_margin) else "⚠️"
             rows.append({
                 "구분":            SHORT_NAMES[coh],
-                "시험약 용량":     f"{dose_mg:.1f}mg ({dose_ug:,}µg)",
-                "Cmax (µg/L)":    round(tw['Cmax'],  1),
+                "시험약 용량":     f"{dose_mg:.1f}mg ({dose_ug:,}ug)",
+                "Cmax (ug/L)":    round(tw['Cmax'],  1),
                 "Tmax (h)":       round(tw['Tmax'],  1),
-                "AUCτ (µg·h/L)": round(tw['AUCtau'],0),
-                "Cavg (µg/L)":    round(tw['Cavg'],  3),
-                "ΔBW τ (%)":      round(tw['dBW'],   2),
+                "AUCt (ug·h/L)":  round(tw['AUCtau'],0),
+                "Cavg (ug/L)":    round(tw['Cavg'],  3),
+                "dBW t (%)":      round(tw['dBW'],   2),
                 "Peak GI (%)":    round(tw['peak_GI'],1),
-                "안전성 판정":     ni_sym,
+                "Safety":         ni_sym,
             })
 
+    df = None
     if rows:
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True, hide_index=True,
             column_config={
-                "구분":             st.column_config.TextColumn(width="medium"),
-                "시험약 용량":      st.column_config.TextColumn(width="medium"),
-                "Cmax (µg/L)":      st.column_config.NumberColumn(format="%.1f"),
-                "Tmax (h)":         st.column_config.NumberColumn(format="%.1f"),
-                "AUCτ (µg·h/L)":   st.column_config.NumberColumn(format="%.0f"),
-                "Cavg (µg/L)":      st.column_config.NumberColumn(format="%.3f"),
-                "ΔBW τ (%)":        st.column_config.NumberColumn(format="%.2f"),
-                "Peak GI (%)":      st.column_config.NumberColumn(format="%.1f"),
-                "안전성 판정":       st.column_config.TextColumn(width="small"),
+                "구분":           st.column_config.TextColumn(width="medium"),
+                "시험약 용량":    st.column_config.TextColumn(width="medium"),
+                "Cmax (ug/L)":    st.column_config.NumberColumn(format="%.1f"),
+                "Tmax (h)":       st.column_config.NumberColumn(format="%.1f"),
+                "AUCt (ug·h/L)":  st.column_config.NumberColumn(format="%.0f"),
+                "Cavg (ug/L)":    st.column_config.NumberColumn(format="%.3f"),
+                "dBW t (%)":      st.column_config.NumberColumn(format="%.2f"),
+                "Peak GI (%)":    st.column_config.NumberColumn(format="%.1f"),
+                "Safety":         st.column_config.TextColumn(width="small"),
             })
         csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇ 결과 다운로드 (CSV)", csv,
+        st.download_button("⬇ CSV 다운로드", csv,
                            file_name=f"pkpd_{multiplier}x_{obs_weeks}wk.csv",
                            mime="text/csv")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ── TAB 2 ──
+    # ── PDF Export ──
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-hdr">📄 PDF Report Export</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:0.84rem;color:#64748b;margin:6px 0 12px 0;">'
+        'PK 프로파일 차트 + 결과 테이블 + 모델 파라미터를 A4 PDF 레포트로 생성합니다.</p>',
+        unsafe_allow_html=True)
+
+    if st.button("📥 PDF 레포트 생성 및 다운로드", key="pdf_btn"):
+        with st.spinner("📄 PDF 생성 중 (차트 이미지 렌더링)..."):
+            try:
+                pdf_bytes = generate_pdf_report(
+                    results=results,
+                    rows_df=df,
+                    multiplier=multiplier,
+                    obs_weeks=obs_weeks,
+                    tau_h=tau_h,
+                    ni_margin=ni_margin,
+                    fig_pk=fig_pk,
+                    fig_bw=fig_bw,
+                    fig_gi=fig_gi,
+                )
+                fn = f"DWJ1691_Report_{multiplier}x_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                st.download_button(
+                    label="⬇ PDF 저장",
+                    data=pdf_bytes,
+                    file_name=fn,
+                    mime="application/pdf",
+                    key="pdf_dl"
+                )
+                st.success("✅ PDF 생성 완료! 위 버튼을 클릭해 저장하세요.")
+            except Exception as e:
+                st.error(f"PDF 생성 오류: {e}")
+                st.info("requirements.txt에 'kaleido>=0.2.1' 및 'reportlab>=4.0.0'이 있는지 확인해주세요.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# ============================================================
+# TAB 2 — 커스텀
+# ============================================================
 with tab_custom:
     st.markdown("""
     <div class="custom-info">
@@ -696,9 +960,11 @@ with tab_custom:
                 f'<span class="window-badge">Duration = {int(c_tau)}h</span></div>',
                 unsafe_allow_html=True)
             fig_cpk = go.Figure()
-            fig_cpk.add_vrect(x0=c_obs/HOURS_PER_WEEK,x1=(c_obs+c_tau)/HOURS_PER_WEEK,
-                fillcolor="rgba(124,58,237,0.08)",line_width=0,
-                annotation_text="관찰구간",annotation_font=dict(size=9,color="#7c3aed"))
+            fig_cpk.add_vrect(
+                x0=c_obs/HOURS_PER_WEEK, x1=(c_obs+c_tau)/HOURS_PER_WEEK,
+                fillcolor="rgba(124,58,237,0.08)", line_width=0,
+                annotation_text="관찰구간",
+                annotation_font=dict(size=9,color="#7c3aed"))
             fig_cpk.add_trace(go.Scatter(
                 x=t_wk_c[::s_c],y=cr['C_ugL'][::s_c],name=c_lbl,
                 line=dict(color="#7c3aed",width=2.5),
@@ -720,8 +986,9 @@ with tab_custom:
                 st.markdown('<div class="chart-card">', unsafe_allow_html=True)
                 st.markdown('<div class="sec-hdr">⚖️ 체중 변화 (%BW)</div>', unsafe_allow_html=True)
                 fig_cbw = go.Figure()
-                fig_cbw.add_trace(go.Scatter(x=t_wk_c[::s_c],y=cr['BW_pct'][::s_c],
-                    name=c_lbl,line=dict(color="#7c3aed",width=2.5),
+                fig_cbw.add_trace(go.Scatter(
+                    x=t_wk_c[::s_c],y=cr['BW_pct'][::s_c],name=c_lbl,
+                    line=dict(color="#7c3aed",width=2.5),
                     hovertemplate="Week:%{x:.1f}<br>ΔBW:%{y:.2f}%<extra></extra>"))
                 fig_cbw.add_hline(y=0,line_dash="dot",line_color="#94a3b8",line_width=1.2)
                 fig_cbw.update_layout(**make_chart_bg(),height=300,showlegend=False)
@@ -733,8 +1000,9 @@ with tab_custom:
                 st.markdown('<div class="chart-card">', unsafe_allow_html=True)
                 st.markdown('<div class="sec-hdr">⚠️ GI 이상반응률 (%)</div>', unsafe_allow_html=True)
                 fig_cgi = go.Figure()
-                fig_cgi.add_trace(go.Scatter(x=t_wk_c[::s_c],y=cr['GI_total'][::s_c],
-                    name=c_lbl,line=dict(color="#7c3aed",width=2.5),
+                fig_cgi.add_trace(go.Scatter(
+                    x=t_wk_c[::s_c],y=cr['GI_total'][::s_c],name=c_lbl,
+                    line=dict(color="#7c3aed",width=2.5),
                     hovertemplate="Week:%{x:.1f}<br>GI AE:%{y:.1f}%<extra></extra>"))
                 fig_cgi.update_layout(**make_chart_bg(),height=300,showlegend=False)
                 apply_axes(fig_cgi,"Time (Week)","GI AE Total (%)")
@@ -742,7 +1010,8 @@ with tab_custom:
                 st.plotly_chart(fig_cgi, use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            wp_c = calc_window(cr['t_h'],cr['C_ugL'],cr['BW_pct'],cr['GI_total'],c_obs,c_tau)
+            wp_c = calc_window(cr['t_h'],cr['C_ugL'],cr['BW_pct'],
+                               cr['GI_total'],c_obs,c_tau)
             if wp_c:
                 st.markdown('<div class="chart-card">', unsafe_allow_html=True)
                 st.markdown(
@@ -752,338 +1021,13 @@ with tab_custom:
                 r1,r2,r3,r4,r5 = st.columns(5)
                 r1.metric("Cmax (µg/L)",    f"{wp_c['Cmax']:.2f}")
                 r2.metric("Tmax (h)",        f"{wp_c['Tmax']:.1f}")
-                r3.metric("AUCτ (µg·h/L)", f"{wp_c['AUCtau']:.0f}")
+                r3.metric("AUCt (µg·h/L)", f"{wp_c['AUCtau']:.0f}")
                 r4.metric("Cavg (µg/L)",    f"{wp_c['Cavg']:.4f}")
-                r5.metric("ΔBW τ (%)",      f"{wp_c['dBW']:.2f}")
+                r5.metric("dBW t (%)",       f"{wp_c['dBW']:.2f}")
                 st.markdown('</div>', unsafe_allow_html=True)
 
-# ============================================================
-# PDF REPORT 생성 함수
-# ============================================================
-def generate_pdf_report(results, rows_df, window_params, ref_window,
-                        multiplier, obs_weeks, tau_h, ni_margin,
-                        fig_pk, fig_bw, fig_gi):
-    """
-    reportlab으로 레포트 PDF 생성
-    차트 이미지 + 결과 테이블 포함
-    """
-    import io
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib import colors
-    from reportlab.lib.units import mm
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
-    from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-        Image as RLImage, HRFlowable, PageBreak
-    )
-    from reportlab.pdfgen import canvas
-    import datetime
-
-    buf    = io.BytesIO()
-    W, H   = A4  # 595 x 842 pt
-    margin = 18 * mm
-
-    # ── 폰트/색상 ──
-    NAVY   = colors.HexColor("#1e3a5f")
-    BLUE   = colors.HexColor("#2166ac")
-    LGRAY  = colors.HexColor("#f1f5f9")
-    DGRAY  = colors.HexColor("#334155")
-    GREEN  = colors.HexColor("#16a34a")
-    RED    = colors.HexColor("#dc2626")
-    AMBER  = colors.HexColor("#d97706")
-    WHITE  = colors.white
-
-    styles = getSampleStyleSheet()
-    sT = ParagraphStyle("Title2", parent=styles["Normal"],
-                        fontSize=16, textColor=WHITE, fontName="Helvetica-Bold",
-                        alignment=TA_LEFT)
-    sS = ParagraphStyle("Sub",   parent=styles["Normal"],
-                        fontSize=9,  textColor=colors.HexColor("#93c5fd"),
-                        fontName="Helvetica", alignment=TA_LEFT)
-    sH = ParagraphStyle("H2",    parent=styles["Normal"],
-                        fontSize=11, textColor=NAVY, fontName="Helvetica-Bold",
-                        spaceBefore=8, spaceAfter=4)
-    sN = ParagraphStyle("Body",  parent=styles["Normal"],
-                        fontSize=9,  textColor=DGRAY, fontName="Helvetica",
-                        leading=13)
-    sSm= ParagraphStyle("Small", parent=styles["Normal"],
-                        fontSize=7.5,textColor=DGRAY, fontName="Helvetica",
-                        leading=11)
-
-    # ── 페이지 번호 콜백 ──
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    def on_page(canv, doc):
-        canv.saveState()
-        canv.setFont("Helvetica", 7.5)
-        canv.setFillColor(colors.HexColor("#94a3b8"))
-        canv.drawString(margin, 12*mm,
-                        f"DWJ1691 PK/PD Simulator Report  |  Generated: {now_str}")
-        canv.drawRightString(W-margin, 12*mm, f"Page {doc.page}")
-        canv.restoreState()
-
-    doc = SimpleDocTemplate(buf, pagesize=A4,
-                            leftMargin=margin, rightMargin=margin,
-                            topMargin=14*mm, bottomMargin=18*mm)
-    story = []
-    inner_w = W - 2*margin
-
-    # ── 헤더 배너 ──
-    def header_banner():
-        d = []
-        d.append(Paragraph("DWJ1691 + Wegovy PK/PD Simulation Report", sT))
-        d.append(Spacer(1, 3))
-        d.append(Paragraph(
-            "미니피그 PK 기반 인체 약동학 예측 · Phoenix NLME · Taeheon Kim, Ph.D.", sS))
-        tbl = Table([d], colWidths=[inner_w])
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,-1), NAVY),
-            ("TOPPADDING",    (0,0),(-1,-1), 10),
-            ("BOTTOMPADDING", (0,0),(-1,-1), 10),
-            ("LEFTPADDING",   (0,0),(-1,-1), 12),
-            ("RIGHTPADDING",  (0,0),(-1,-1), 12),
-            ("ROUNDEDCORNERS", (0,0),(-1,-1), [6,6,6,6]),
-        ]))
-        return tbl
-
-    story.append(header_banner())
-    story.append(Spacer(1, 5*mm))
-
-    # ── 시뮬레이션 설정 요약 ──
-    story.append(Paragraph("Simulation Settings", sH))
-    story.append(HRFlowable(width=inner_w, thickness=1, color=BLUE, spaceAfter=4))
-
-    cfg_data = [
-        ["Parameter", "Value"],
-        ["Dose Multiplier", f"{multiplier}× (vs. Wegovy)"],
-        ["Cohort I Dose",   f"{1000*multiplier/1000:.1f} mg ({1000*multiplier:,} µg)"],
-        ["Cohort II Dose",  f"{1700*multiplier/1000:.1f} mg ({1700*multiplier:,} µg)"],
-        ["Cohort III Dose", f"{2400*multiplier/1000:.1f} mg ({2400*multiplier:,} µg)"],
-        ["Observation Window (tau)", f"{obs_weeks} weeks ({int(tau_h)} h)"],
-        ["Safety Cmax Threshold", f"{ni_margin}x vs. Wegovy"],
-        ["Generated", now_str],
-    ]
-    cfg_tbl = Table(cfg_data,
-                    colWidths=[inner_w*0.45, inner_w*0.55])
-    cfg_tbl.setStyle(TableStyle([
-        ("BACKGROUND",    (0,0),(-1,0),  BLUE),
-        ("TEXTCOLOR",     (0,0),(-1,0),  WHITE),
-        ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
-        ("FONTSIZE",      (0,0),(-1,-1), 8.5),
-        ("FONTNAME",      (0,1),(-1,-1), "Helvetica"),
-        ("ROWBACKGROUNDS",(0,1),(-1,-1), [LGRAY, WHITE]),
-        ("TEXTCOLOR",     (0,1),(-1,-1), DGRAY),
-        ("GRID",          (0,0),(-1,-1), 0.3, colors.HexColor("#e2e8f0")),
-        ("TOPPADDING",    (0,0),(-1,-1), 5),
-        ("BOTTOMPADDING", (0,0),(-1,-1), 5),
-        ("LEFTPADDING",   (0,0),(-1,-1), 8),
-        ("RIGHTPADDING",  (0,0),(-1,-1), 8),
-    ]))
-    story.append(cfg_tbl)
-    story.append(Spacer(1, 5*mm))
-
-    # ── 차트 이미지 ──
-    story.append(Paragraph("PK/PD Profiles", sH))
-    story.append(HRFlowable(width=inner_w, thickness=1, color=BLUE, spaceAfter=4))
-
-    def fig_to_image(fig, width_pt, height_pt):
-        img_bytes = fig.to_image(format="png", width=int(width_pt*2),
-                                 height=int(height_pt*2), scale=2)
-        return io.BytesIO(img_bytes)
-
-    try:
-        # PK 차트 (전체 너비)
-        pk_img  = fig_to_image(fig_pk, inner_w, 200)
-        story.append(RLImage(pk_img, width=inner_w, height=200))
-        story.append(Spacer(1, 2*mm))
-
-        # BW + GI (나란히)
-        bw_img  = fig_to_image(fig_bw, inner_w*0.5-2, 140)
-        gi_img  = fig_to_image(fig_gi, inner_w*0.5-2, 140)
-        chart_row = Table(
-            [[RLImage(bw_img, width=inner_w*0.5-2, height=140),
-              RLImage(gi_img, width=inner_w*0.5-2, height=140)]],
-            colWidths=[inner_w*0.5, inner_w*0.5]
-        )
-        chart_row.setStyle(TableStyle([
-            ("LEFTPADDING",  (0,0),(-1,-1), 0),
-            ("RIGHTPADDING", (0,0),(-1,-1), 0),
-            ("TOPPADDING",   (0,0),(-1,-1), 0),
-            ("BOTTOMPADDING",(0,0),(-1,-1), 0),
-        ]))
-        story.append(chart_row)
-    except Exception as e:
-        story.append(Paragraph(
-            f"[차트 이미지 생성 실패: {str(e)[:80]}]", sSm))
-
-    story.append(Spacer(1, 5*mm))
-
-    # ── 결과 테이블 ──
-    story.append(Paragraph(
-        f"Observation Window Results (tau = {obs_weeks}wk / {int(tau_h)}h)", sH))
-    story.append(HRFlowable(width=inner_w, thickness=1, color=BLUE, spaceAfter=4))
-
-    if rows_df is not None and len(rows_df) > 0:
-        cols = list(rows_df.columns)
-        header_row = [Paragraph(f"<b>{c}</b>", sSm) for c in cols]
-        data_rows  = [header_row]
-        for _, row in rows_df.iterrows():
-            r = []
-            for v in row.values:
-                r.append(Paragraph(str(v) if v is not None else "—", sSm))
-            data_rows.append(r)
-
-        n = len(cols)
-        col_w = inner_w / n
-        res_tbl = Table(data_rows, colWidths=[col_w]*n, repeatRows=1)
-
-        # 행 색상: Reference(회색), Cohort(흰색/연파랑 교대)
-        ts = [
-            ("BACKGROUND",    (0,0),(-1,0),  BLUE),
-            ("TEXTCOLOR",     (0,0),(-1,0),  WHITE),
-            ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
-            ("FONTSIZE",      (0,0),(-1,-1), 7.5),
-            ("GRID",          (0,0),(-1,-1), 0.3, colors.HexColor("#e2e8f0")),
-            ("TOPPADDING",    (0,0),(-1,-1), 4),
-            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
-            ("LEFTPADDING",   (0,0),(-1,-1), 5),
-            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
-            ("ALIGN",         (2,0),(-1,-1), "CENTER"),
-        ]
-        for i, (_, row) in enumerate(rows_df.iterrows(), start=1):
-            lbl = str(row.iloc[0])
-            if "Wegovy" in lbl and "Cohort" not in lbl:
-                ts.append(("BACKGROUND", (0,i),(-1,i), LGRAY))
-                ts.append(("TEXTCOLOR",  (0,i),(-1,i), DGRAY))
-            else:
-                bg = colors.HexColor("#eff6ff") if i%2==0 else WHITE
-                ts.append(("BACKGROUND", (0,i),(-1,i), bg))
-            # 안전성 판정 컬럼 색상
-            last = str(row.iloc[-1])
-            if last == "✅":
-                ts.append(("TEXTCOLOR",  (-1,i),(-1,i), GREEN))
-            elif last == "⚠️":
-                ts.append(("TEXTCOLOR",  (-1,i),(-1,i), RED))
-
-        res_tbl.setStyle(TableStyle(ts))
-        story.append(res_tbl)
-
-    story.append(Spacer(1, 5*mm))
-
-    # ── PK 파라미터 요약 ──
-    story.append(Paragraph("Model Parameters (Phoenix NLME fixef)", sH))
-    story.append(HRFlowable(width=inner_w, thickness=1, color=BLUE, spaceAfter=4))
-
-    param_data = [
-        ["Parameter", "Value", "Unit"],
-        ["V (Volume)",           "12.4",   "L"],
-        ["CL (Clearance)",       "0.0475", "L/h"],
-        ["Ka (FR->A1)",          "0.1026", "h-1"],
-        ["ka_SC (R->A1)",        "0.0296", "h-1"],
-        ["F_SC",                 "0.9",    "-"],
-        ["Scale_LAI",            "0.2459", "-"],
-        ["F_DR",                 "0.429",  "-"],
-        ["kdr",                  "0.02",   "h-1"],
-        ["Imax",                 "0.25",   "-"],
-        ["IC50",                 "55.0",   "ug/L"],
-        ["kout",                 "0.00039","h-1"],
-        ["E0_AE",                "0.4833", "-"],
-        ["Emax_AE",              "0.2867", "-"],
-        ["EC50_AE",              "32.98",  "ug/L"],
-    ]
-    half = len(param_data)//2 + 1
-    left_data  = param_data[:half]
-    right_data = param_data[half:]
-    # 길이 맞추기
-    while len(right_data) < len(left_data):
-        right_data.append(["","",""])
-
-    def make_param_sub_tbl(data):
-        t = Table(data, colWidths=[inner_w*0.22, inner_w*0.10, inner_w*0.10])
-        ts2 = [
-            ("BACKGROUND",    (0,0),(-1,0),  colors.HexColor("#e0e7ff")),
-            ("TEXTCOLOR",     (0,0),(-1,0),  NAVY),
-            ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
-            ("FONTNAME",      (0,1),(-1,-1), "Helvetica"),
-            ("FONTSIZE",      (0,0),(-1,-1), 8),
-            ("ROWBACKGROUNDS",(0,1),(-1,-1), [LGRAY, WHITE]),
-            ("TEXTCOLOR",     (0,1),(-1,-1), DGRAY),
-            ("GRID",          (0,0),(-1,-1), 0.3, colors.HexColor("#e2e8f0")),
-            ("TOPPADDING",    (0,0),(-1,-1), 4),
-            ("BOTTOMPADDING", (0,0),(-1,-1), 4),
-            ("LEFTPADDING",   (0,0),(-1,-1), 6),
-            ("RIGHTPADDING",  (0,0),(-1,-1), 6),
-        ]
-        t.setStyle(TableStyle(ts2))
-        return t
-
-    param_row = Table(
-        [[make_param_sub_tbl(left_data), make_param_sub_tbl(right_data)]],
-        colWidths=[inner_w*0.5-2, inner_w*0.5-2]
-    )
-    param_row.setStyle(TableStyle([
-        ("LEFTPADDING",  (0,0),(-1,-1), 0),
-        ("RIGHTPADDING", (0,0),(-1,-1), 4),
-        ("TOPPADDING",   (0,0),(-1,-1), 0),
-        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
-    ]))
-    story.append(param_row)
-    story.append(Spacer(1, 4*mm))
-
-    # ── 푸터 메모 ──
-    story.append(HRFlowable(width=inner_w, thickness=0.5,
-                            color=colors.HexColor("#cbd5e1"), spaceAfter=3))
-    story.append(Paragraph(
-        "This report is generated from DWJ1691 PK/PD Simulator based on Minipig PK data "
-        "(Phoenix NLME). Results are for investigational use only.",
-        sSm))
-
-    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
-    buf.seek(0)
-    return buf.read()
-                            
-# Model Info
+# ── Model Info ──
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-# ── PDF 다운로드 버튼 ──
-    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-    st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="sec-hdr">📄 Report Export</div>',
-        unsafe_allow_html=True)
-    st.markdown(
-        '<p style="font-size:0.83rem;color:#64748b;margin-bottom:10px">'
-        'PK 프로파일 차트 + 결과 테이블 + 모델 파라미터를 PDF 레포트로 다운로드합니다.</p>',
-        unsafe_allow_html=True)
-
-    if st.button("📥 PDF 레포트 다운로드", key="pdf_btn"):
-        with st.spinner("📄 PDF 생성 중..."):
-            try:
-                pdf_bytes = generate_pdf_report(
-                    results=results,
-                    rows_df=df if 'df' in dir() and df is not None else None,
-                    window_params=test_window,
-                    ref_window=ref_window,
-                    multiplier=multiplier,
-                    obs_weeks=obs_weeks,
-                    tau_h=tau_h,
-                    ni_margin=ni_margin,
-                    fig_pk=fig_pk,
-                    fig_bw=fig_bw,
-                    fig_gi=fig_gi,
-                )
-                now_fn = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-                st.download_button(
-                    label="⬇ PDF 저장 클릭",
-                    data=pdf_bytes,
-                    file_name=f"DWJ1691_PK_Report_{multiplier}x_{now_fn}.pdf",
-                    mime="application/pdf",
-                    key="pdf_dl"
-                )
-                st.success("✅ PDF 생성 완료! 위 버튼을 클릭해 저장하세요.")
-            except Exception as e:
-                st.error(f"PDF 생성 오류: {str(e)}")
-                st.info("requirements.txt에 'kaleido>=0.2.1'이 포함되어 있는지 확인해주세요.")
-    st.markdown('</div>', unsafe_allow_html=True)
 with st.expander("📋 모델 파라미터 (Phoenix NLME fixef)"):
     c1,c2,c3 = st.columns(3)
     with c1:
@@ -1094,11 +1038,11 @@ with st.expander("📋 모델 파라미터 (Phoenix NLME fixef)"):
         st.markdown(f"- F_DR={P['F_DR']} → F_FR={P['F_SC']-P['F_DR']:.3f}, kdr={P['kdr']} h⁻¹")
     with c2:
         st.markdown("**BW PD — Indirect Response**")
-        st.markdown("- kin=kout×100, E_drug=Imax·Cᵞ/(IC50ᵞ+Cᵞ)")
+        st.markdown("- kin=kout×100, E_drug=Imax·C^γ/(IC50^γ+C^γ)")
         st.markdown(f"- Imax={P['Imax']}, IC50={P['IC50']} µg/L, kout={P['kout']} h⁻¹")
     with c3:
         st.markdown("**GI AE / Validation**")
-        st.markdown(f"- E₀={P['E0_AE']}, Emax={P['Emax_AE']}, EC50={P['EC50_AE']} µg/L")
+        st.markdown(f"- E0={P['E0_AE']}, Emax={P['Emax_AE']}, EC50={P['EC50_AE']} µg/L")
         st.markdown("- t=1h: 0.5282 ✓ | t=1344h: 43.97 ✓ | t=2688h: 150.72 ✓")
 
 st.markdown(f"""
@@ -1106,6 +1050,6 @@ st.markdown(f"""
             padding:12px 0;margin-top:12px;background:#ffffff;
             border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,0.05)'>
   🐷 Minipig PK → Human 예측 · Phoenix NLME Validated ·
-  Taeheon Kim, Ph.D. · 2026-02-19 · v9.0 · 현재 배수: {multiplier}×
+  Taeheon Kim, Ph.D. · 2026-02-19 · v10.0 · 현재 배수: {multiplier}×
 </div>
 """, unsafe_allow_html=True)
