@@ -173,103 +173,102 @@ COHORT_COLORS = {
 }
 
 # ============================================================
-# DEFAULT PARAMETERS
+# MODEL PARAMETERS — Phoenix NLME fixef estimates
+# Modeler: Taeheon Kim, Ph.D. (2026-02-19)
+# Units: Dose(mg), C(mg/L=µg/mL), V(L), CL(L/h), rate(h-1)
 # ============================================================
 DEFAULT = dict(
-    sema_ka=0.02, sema_CL=0.066, sema_V1=3.5,
-    sema_Q=0.12,  sema_V2=7.0,   sema_F=0.89,
-    dwj_ka=0.008, dwj_CL=0.010,  dwj_V1=3.0,
-    dwj_Q=0.05,   dwj_V2=6.0,    dwj_F=0.75,
-    dwj_kon=0.091, dwj_koff=0.001,
-    dwj_kint=0.005, dwj_ksyn=1.0, dwj_kdeg=0.05,
-    bw_base=100, bw_kin=0.0001, bw_kout=0.0001,
-    bw_Emax_s=0.8, bw_EC50_s=50,
-    bw_Emax_d=0.6, bw_EC50_d=20,
-    gi_E0=0.05, gi_Emax=0.95, gi_EC50=80, gi_hill=1.5
+    # Shared 1-cpt PK
+    V        = 25.0,    # Central volume (L)
+    Cl       = 3.5,     # Clearance (L/h)
+    # Wegovy SC absorption
+    Ka       = 5.2,     # Wegovy fast-depot absorption rate (h-1)
+    ka_SC    = 1.0,     # SC R-compartment absorption rate (h-1)
+    F_SC     = 0.9,     # SC bioavailability
+    # DWJ1691 LAI absorption
+    Scale_LAI = 0.2,    # LAI dose scaling factor
+    F_DR     = 0.2,     # Delayed release fraction
+    kdr      = 1.0,     # Transit rate for delayed release (h-1)
+    # BW PD — Indirect Response, sigmoidal Imax
+    bw_base  = 100.0,   # Baseline body weight (kg)
+    Imax     = 0.21,    # Maximum inhibition (0-1)
+    IC50     = 55.0,    # IC50 (mg/L)
+    Gamma    = 0.5,     # Hill coefficient
+    kout     = 0.00039, # BW turnover rate (h-1)
+    # GI AE — Simple Emax
+    E0_AE    = 0.4833,  # Baseline GI AE (0-1)
+    Emax_AE  = 0.2867,  # Max drug-induced GI AE
+    EC50_AE  = 32.98,   # EC50 for GI AE (mg/L)
 )
 
 # ============================================================
-# ODE SYSTEM
+# ODE SYSTEM — Phoenix NLME PML (Taeheon Kim, Ph.D.)
+# 
+# State variables:
+#   A1   : Central compartment (mg)
+#   FR   : Fast-release LAI depot (mg)
+#   DR/DR1/DR2/DR3 : 3-transit delayed-release chain (mg)
+#   R    : Wegovy SC absorption depot (mg)
+#   BW   : Body weight (kg)
+#
+# Derived:
+#   C    = A1 / V          (mg/L = µg/mL)
+#   F_FR = F_SC - F_DR     (fast release fraction)
+#   kin  = kout * Current_Baseline
 # ============================================================
-def pkpd_ode(y, t, p, dose_fn_sema, dose_fn_dwj):
-    A_sd, A_sc, A_sp, A_dd, A_dc, A_dp, R_free, RC, BW = y
+def pkpd_ode(y, t, p, dose_fn_sema, dose_fn_lai):
+    A1, FR, DR, DR1, DR2, DR3, R, BW = y
 
-    # Semaglutide PK
-    dA_sd = -p['ka_s'] * A_sd + dose_fn_sema(t)
-    C_sc  = A_sc / p['V1_s']
-    dA_sc = p['ka_s'] * p['F_s'] * A_sd \
-            - (p['CL_s']/p['V1_s'] + p['Q_s']/p['V1_s']) * A_sc \
-            + (p['Q_s']/p['V2_s']) * A_sp
-    dA_sp = (p['Q_s']/p['V1_s']) * A_sc - (p['Q_s']/p['V2_s']) * A_sp
-    C_sema = C_sc * 1000  # ug/L
+    V   = p['V']
+    Cl  = p['Cl']
+    Ka  = p['Ka']
+    ka_SC = p['ka_SC']
+    kdr = p['kdr']
 
-    # DWJ1691 PK (TMDD simplified)
-    dA_dd = -p['ka_d'] * A_dd + dose_fn_dwj(t)
-    C_dc  = A_dc / p['V1_d']
-    dA_dc = p['ka_d'] * p['F_d'] * A_dd \
-            - (p['CL_d']/p['V1_d'] + p['Q_d']/p['V1_d']) * A_dc \
-            + (p['Q_d']/p['V2_d']) * A_dp \
-            - p['kon'] * C_dc * R_free * p['V1_d'] \
-            + p['koff'] * RC * p['V1_d']
-    dA_dp = (p['Q_d']/p['V1_d']) * A_dc - (p['Q_d']/p['V2_d']) * A_dp
-    C_dwj = C_dc * 1000  # ug/L
+    # Concentration (mg/L)
+    C = A1 / V
 
-    # TMDD
-    dR_free = p['ksyn'] - p['kdeg']*R_free \
-              - p['kon']*C_dc*R_free + p['koff']*RC
-    dRC     = p['kon']*C_dc*R_free - p['koff']*RC - p['kint']*RC
+    # Fractions
+    F_SC = p['F_SC']
+    F_DR = p['F_DR']
+    F_FR = F_SC - F_DR          # fast-release fraction
 
-    # PD: Body weight
-    IS    = p['Emax_s'] * C_sema / (p['EC50_s'] + C_sema + 1e-10)
-    ID    = p['Emax_d'] * C_dwj  / (p['EC50_d'] + C_dwj  + 1e-10)
-    Icomb = 1 - (1 - IS) * (1 - ID)
-    dBW   = p['kin_bw'] * (1 - Icomb) - p['kout_bw'] * BW
+    Scale_LAI = p['Scale_LAI']
 
-    return [dA_sd, dA_sc, dA_sp, dA_dd, dA_dc, dA_dp, dR_free, dRC, dBW]
+    # --- PK ODEs (Phoenix PML translated) ---
+    # Central compartment: receives FR (fast LAI), DR3 (delayed LAI), R (SC)
+    dA1  = -(Cl * C) + (Ka * FR) + (kdr * DR3) + (ka_SC * R)
+
+    # Fast-release LAI depot
+    dFR  = -(FR * Ka)
+
+    # 3-transit delayed-release chain
+    dDR  = -(DR * kdr)
+    dDR1 = (DR * kdr)  - (DR1 * kdr)
+    dDR2 = (DR1 * kdr) - (DR2 * kdr)
+    dDR3 = (DR2 * kdr) - (DR3 * kdr)
+
+    # Wegovy SC depot (R compartment)
+    dR   = -(R * ka_SC) + dose_fn_sema(t)
+
+    # --- PD: Body Weight (Indirect Response, sigmoidal Imax) ---
+    Imax  = p['Imax']
+    IC50  = p['IC50']
+    Gamma = p['Gamma']
+    kout  = p['kout']
+
+    E = (Imax * C**Gamma) / (IC50**Gamma + C**Gamma + 1e-12)
+    Current_Baseline = 100.0 - (6.0 * (1.0 - np.exp(-0.0001 * t)))
+    kin = kout * Current_Baseline
+    dBW = kin * (1.0 - E) - kout * BW
+
+    return [dA1, dFR, dDR, dDR1, dDR2, dDR3, dR, dBW]
 
 # ============================================================
 # DOSING HELPERS
 # ============================================================
-def make_dose_fn(dose_times_h, dose_amt, duration_h=1.0):
-    """Returns a continuous infusion-like dose function."""
-    def fn(t):
-        for dt in dose_times_h:
-            if dt <= t < dt + duration_h:
-                return dose_amt / duration_h
-        return 0.0
-    return fn
-
-def sema_schedule(skip_block=None):
-    levels = [0.25, 0.5, 1.0, 1.7, 2.4]
-    times  = []
-    for block in range(5):
-        if block == skip_block:
-            continue
-        for w in range(4):
-            times.append((block * 28 + w * 7) * 24)
-    return times, levels
-
-def build_sema_doses(skip_block=None):
-    levels = [0.25, 0.5, 1.0, 1.7, 2.4]
-    times_h, amts = [], []
-    for block in range(5):
-        if block == skip_block:
-            continue
-        dose = levels[block] * 1000 * DEFAULT['sema_F']  # mg -> ug
-        for w in range(4):
-            t = (block * 28 + w * 7) * 24
-            times_h.append(t)
-            amts.append(dose)
-    return times_h, amts
-
-def build_dwj_doses(skip_block, dwj_dose_mg):
-    if skip_block is None:
-        return [], []
-    t = skip_block * 28 * 24
-    amt = dwj_dose_mg * 1000 * DEFAULT['dwj_F']
-    return [t], [amt]
-
-def make_pulsed_fn(times_h, amts, dur=1.0):
+def make_pulsed_fn(times_h, amts, dur=0.5):
+    """Bolus dose approximated as short infusion."""
     pairs = list(zip(times_h, amts))
     def fn(t):
         for (dt, amt) in pairs:
@@ -277,6 +276,39 @@ def make_pulsed_fn(times_h, amts, dur=1.0):
                 return amt / dur
         return 0.0
     return fn
+
+def build_sema_doses(skip_block=None):
+    """Wegovy once-weekly SC, 5-step escalation (4wk each block)."""
+    levels = [0.25, 0.5, 1.0, 1.7, 2.4]   # mg
+    times_h, amts = [], []
+    for block in range(5):
+        if block == skip_block:
+            continue
+        dose = levels[block] * DEFAULT['F_SC']   # effective SC dose (mg)
+        for w in range(4):
+            t = (block * 28 + w * 7) * 24        # hours
+            times_h.append(t)
+            amts.append(dose)
+    return times_h, amts
+
+def build_lai_doses(skip_block, dwj_dose_mg):
+    """DWJ1691 LAI once-monthly SC injection.
+    Dose splits into FR (fast) and DR (delayed) at dosepoint.
+    bioavail applied here as Scale_LAI * fraction.
+    """
+    if skip_block is None:
+        return [], [], [], []
+
+    t_h      = skip_block * 28 * 24
+    Scale    = DEFAULT['Scale_LAI']
+    F_DR     = DEFAULT['F_DR']
+    F_SC     = DEFAULT['F_SC']
+    F_FR     = F_SC - F_DR
+
+    amt_FR   = dwj_dose_mg * Scale * F_FR   # fast-release portion (mg)
+    amt_DR   = dwj_dose_mg * Scale * F_DR   # delayed-release portion (mg)
+
+    return [t_h], [amt_FR], [t_h], [amt_DR]
 
 COHORT_SKIP = {
     "Reference":               None,
@@ -290,55 +322,103 @@ COHORT_SKIP = {
 # ============================================================
 @st.cache_data(show_spinner=False)
 def run_simulation(cohorts_tuple, dwj_dose_mg, sim_weeks,
-                   ec50_s, ec50_d, gi_ec50):
+                   IC50_slider, EC50_AE_slider, kout_slider):
     p = dict(
-        ka_s=DEFAULT['sema_ka'], CL_s=DEFAULT['sema_CL'],
-        V1_s=DEFAULT['sema_V1'], Q_s=DEFAULT['sema_Q'],
-        V2_s=DEFAULT['sema_V2'], F_s=DEFAULT['sema_F'],
-        ka_d=DEFAULT['dwj_ka'],  CL_d=DEFAULT['dwj_CL'],
-        V1_d=DEFAULT['dwj_V1'], Q_d=DEFAULT['dwj_Q'],
-        V2_d=DEFAULT['dwj_V2'], F_d=DEFAULT['dwj_F'],
-        kon=DEFAULT['dwj_kon'], koff=DEFAULT['dwj_koff'],
-        kint=DEFAULT['dwj_kint'], ksyn=DEFAULT['dwj_ksyn'],
-        kdeg=DEFAULT['dwj_kdeg'],
-        kin_bw=DEFAULT['bw_kin'], kout_bw=DEFAULT['bw_kout'],
-        Emax_s=DEFAULT['bw_Emax_s'], EC50_s=ec50_s,
-        Emax_d=DEFAULT['bw_Emax_d'], EC50_d=ec50_d,
-        E0_gi=DEFAULT['gi_E0'], Emax_gi=DEFAULT['gi_Emax'],
-        EC50_gi=gi_ec50, hill_gi=DEFAULT['gi_hill']
+        V        = DEFAULT['V'],
+        Cl       = DEFAULT['Cl'],
+        Ka       = DEFAULT['Ka'],
+        ka_SC    = DEFAULT['ka_SC'],
+        F_SC     = DEFAULT['F_SC'],
+        Scale_LAI= DEFAULT['Scale_LAI'],
+        F_DR     = DEFAULT['F_DR'],
+        kdr      = DEFAULT['kdr'],
+        bw_base  = DEFAULT['bw_base'],
+        Imax     = DEFAULT['Imax'],
+        IC50     = IC50_slider,
+        Gamma    = DEFAULT['Gamma'],
+        kout     = kout_slider,
+        E0_AE    = DEFAULT['E0_AE'],
+        Emax_AE  = DEFAULT['Emax_AE'],
+        EC50_AE  = EC50_AE_slider,
     )
-    R0 = p['ksyn'] / p['kdeg']
-    y0 = [0, 0, 0, 0, 0, 0, R0, 0, DEFAULT['bw_base']]
 
-    t_end = sim_weeks * 7 * 24
-    t = np.linspace(0, t_end, sim_weeks * 7 * 24 + 1)
+    # Initial conditions: all depots empty, BW at baseline
+    y0 = [0.0,   # A1
+          0.0,   # FR
+          0.0,   # DR
+          0.0,   # DR1
+          0.0,   # DR2
+          0.0,   # DR3
+          0.0,   # R (Wegovy SC depot)
+          DEFAULT['bw_base']]  # BW
+
+    t_end = sim_weeks * 7 * 24   # hours
+    t_vec = np.linspace(0, t_end, sim_weeks * 7 * 24 + 1)
 
     results = {}
     for coh in cohorts_tuple:
         skip = COHORT_SKIP[coh]
+
+        # Wegovy SC doses → R compartment via dose_fn
         st_h, sa = build_sema_doses(skip)
-        dt_h, da = build_dwj_doses(skip, dwj_dose_mg)
-        fn_s = make_pulsed_fn(st_h, sa)
-        fn_d = make_pulsed_fn(dt_h, da)
+        fn_sema  = make_pulsed_fn(st_h, sa)
 
-        sol = odeint(pkpd_ode, y0, t,
-                     args=(p, fn_s, fn_d),
-                     mxstep=5000)
+        # DWJ1691 LAI doses → split into FR and DR at t=0 of injection
+        fr_h, fr_a, dr_h, dr_a = build_lai_doses(skip, dwj_dose_mg)
+        fn_fr = make_pulsed_fn(fr_h, fr_a)
+        fn_dr = make_pulsed_fn(dr_h, dr_a)
 
-        C_sema = sol[:, 1] / p['V1_s'] * 1000
-        C_dwj  = sol[:, 4] / p['V1_d'] * 1000
-        BW     = sol[:, 8]
-        C_pk   = C_sema + 0.5 * C_dwj
-        GI     = p['E0_gi'] + (p['Emax_gi'] - p['E0_gi']) * \
-                 C_pk**p['hill_gi'] / \
-                 (p['EC50_gi']**p['hill_gi'] + C_pk**p['hill_gi'] + 1e-10)
+        # Wrap into single LAI function used inside ODE for FR/DR injection
+        # (FR and DR depots receive their respective fractions at dose time)
+        def make_lai_fn(ffr, fdr):
+            def fn(t):
+                return ffr(t), fdr(t)
+            return fn
+        fn_lai = make_lai_fn(fn_fr, fn_dr)
+
+        # Custom ODE wrapper to inject FR and DR separately
+        def ode_wrap(y, t, p=p, fn_sema=fn_sema,
+                     fn_fr=fn_fr, fn_dr=fn_dr):
+            A1, FR, DR, DR1, DR2, DR3, R, BW = y
+            V     = p['V'];  Cl = p['Cl']
+            Ka    = p['Ka']; ka_SC = p['ka_SC']; kdr = p['kdr']
+            C     = A1 / V
+            F_SC  = p['F_SC']; F_DR = p['F_DR']
+
+            # Dose injections
+            dose_R  = fn_sema(t)   # → R depot
+            dose_FR = fn_fr(t)     # → FR depot
+            dose_DR = fn_dr(t)     # → DR depot
+
+            dA1  = -(Cl * C) + (Ka * FR) + (kdr * DR3) + (ka_SC * R)
+            dFR  = -(FR * Ka)  + dose_FR
+            dDR  = -(DR * kdr) + dose_DR
+            dDR1 = (DR * kdr)  - (DR1 * kdr)
+            dDR2 = (DR1 * kdr) - (DR2 * kdr)
+            dDR3 = (DR2 * kdr) - (DR3 * kdr)
+            dR   = -(R * ka_SC) + dose_R
+
+            Imax  = p['Imax'];  IC50 = p['IC50']; Gamma = p['Gamma']
+            kout  = p['kout']
+            E = (Imax * C**Gamma) / (IC50**Gamma + C**Gamma + 1e-12)
+            Current_Baseline = 100.0 - (6.0 * (1.0 - np.exp(-0.0001 * t)))
+            kin = kout * Current_Baseline
+            dBW = kin * (1.0 - E) - kout * BW
+
+            return [dA1, dFR, dDR, dDR1, dDR2, dDR3, dR, dBW]
+
+        sol = odeint(ode_wrap, y0, t_vec, mxstep=10000)
+
+        C_mgL  = sol[:, 0] / p['V']                      # mg/L
+        BW_arr = sol[:, 7]
+        GI     = p['E0_AE'] + p['Emax_AE'] * C_mgL / \
+                 (p['EC50_AE'] + C_mgL + 1e-12)           # 0-1 scale
 
         results[coh] = dict(
-            t_weeks = t / (7 * 24),
-            C_sema  = C_sema,
-            C_dwj   = C_dwj,
-            BW_pct  = (BW - DEFAULT['bw_base']) / DEFAULT['bw_base'] * 100,
-            GI_rate = GI * 100
+            t_weeks = t_vec / (7 * 24),
+            C_mgL   = C_mgL,
+            BW_pct  = (BW_arr - DEFAULT['bw_base']) / DEFAULT['bw_base'] * 100,
+            GI_rate = GI * 100,   # %
         )
     return results
 
@@ -366,12 +446,15 @@ with st.sidebar:
                 unsafe_allow_html=True)
     sim_weeks = st.slider("Duration (weeks)", 12, 36, 25, 1)
 
-    st.markdown("---")
     st.markdown('<div class="section-header">PD Parameters</div>',
                 unsafe_allow_html=True)
-    ec50_s   = st.slider("Sema EC50 BW (µg/L)",  10, 150, 50, 5)
-    ec50_d   = st.slider("DWJ EC50 BW (µg/L)",    5,  80, 20, 5)
-    gi_ec50  = st.slider("GI EC50 (µg/L)",        20, 200, 80, 10)
+    IC50_slider    = st.slider("IC50 — BW (mg/L)",   10, 150,
+                                int(DEFAULT['IC50']),  5)
+    EC50_AE_slider = st.slider("EC50 — GI AE (mg/L)", 5, 100,
+                                int(DEFAULT['EC50_AE']), 5)
+    kout_slider    = st.slider("kout × 10⁻⁴ (h⁻¹)",  1, 20,
+                                int(DEFAULT['kout']*10000), 1)
+    kout_val = kout_slider * 1e-4
 
     st.markdown("---")
     run = st.button("▶  Run Simulation")
@@ -402,29 +485,28 @@ if not active_cohorts:
 with st.spinner("Running ODE simulation..."):
     results = run_simulation(
         tuple(active_cohorts), dwj_dose, sim_weeks,
-        ec50_s, ec50_d, gi_ec50
+        IC50_slider, EC50_AE_slider, kout_val
     )
 
 # ---- KPI Cards ----
-all_sema = np.concatenate([r['C_sema'] for r in results.values()])
-all_dwj  = np.concatenate([r['C_dwj']  for r in results.values()])
-all_bw   = np.concatenate([r['BW_pct'] for r in results.values()])
-all_gi   = np.concatenate([r['GI_rate'] for r in results.values()])
+all_C  = np.concatenate([r['C_mgL']  for r in results.values()])
+all_bw = np.concatenate([r['BW_pct'] for r in results.values()])
+all_gi = np.concatenate([r['GI_rate'] for r in results.values()])
 
 k1, k2, k3, k4 = st.columns(4)
 with k1:
     st.markdown(f"""
     <div class="kpi-card">
-      <div class="kpi-label">Sema C<sub>max</sub></div>
-      <div class="kpi-value kpi-blue">{np.max(all_sema):.1f}</div>
-      <div class="kpi-unit">µg/L</div>
+      <div class="kpi-label">C<sub>max</sub> (combined)</div>
+      <div class="kpi-value kpi-blue">{np.max(all_C):.3f}</div>
+      <div class="kpi-unit">mg/L</div>
     </div>""", unsafe_allow_html=True)
 with k2:
     st.markdown(f"""
     <div class="kpi-card">
-      <div class="kpi-label">DWJ1691 C<sub>max</sub></div>
-      <div class="kpi-value kpi-red">{np.max(all_dwj):.1f}</div>
-      <div class="kpi-unit">µg/L</div>
+      <div class="kpi-label">IC50 / EC50<sub>AE</sub></div>
+      <div class="kpi-value kpi-red">{IC50_slider} / {EC50_AE_slider}</div>
+      <div class="kpi-unit">mg/L</div>
     </div>""", unsafe_allow_html=True)
 with k3:
     st.markdown(f"""
@@ -451,26 +533,18 @@ fig_pk = go.Figure()
 for coh, r in results.items():
     col = COHORT_COLORS[coh]
     tw  = r['t_weeks']
-    # Sema solid
     fig_pk.add_trace(go.Scatter(
-        x=tw[::6], y=r['C_sema'][::6],
-        name=f"{coh} · Sema",
+        x=tw[::6], y=r['C_mgL'][::6],
+        name=coh,
         line=dict(color=col, width=2, dash='solid'),
-        hovertemplate="%{y:.1f} µg/L"
-    ))
-    # DWJ dashed
-    fig_pk.add_trace(go.Scatter(
-        x=tw[::6], y=r['C_dwj'][::6],
-        name=f"{coh} · DWJ1691",
-        line=dict(color=col, width=1.5, dash='dot'),
-        hovertemplate="%{y:.1f} µg/L"
+        hovertemplate="%{y:.4f} mg/L"
     ))
 
 fig_pk.update_layout(
     **PLOT_LAYOUT,
     height=340,
     xaxis_title="Time (Week)",
-    yaxis_title="Plasma concentration (µg/L)",
+    yaxis_title="Plasma concentration (mg/L)",
     legend=dict(
         bgcolor="#1a2035", bordercolor="#2a3550", borderwidth=1,
         orientation="h", yanchor="bottom", y=1.02,
@@ -526,15 +600,13 @@ st.markdown('<div class="section-header">PK Summary Table</div>',
             unsafe_allow_html=True)
 
 rows = []
-bw0 = DEFAULT['bw_base']
 for coh, r in results.items():
     tw = r['t_weeks']
     rows.append({
-        "Cohort":            coh,
-        "Sema Cmax (µg/L)": round(float(np.max(r['C_sema'])), 2),
-        "Sema Tmax (wk)":   round(float(tw[np.argmax(r['C_sema'])]), 1),
-        "DWJ Cmax (µg/L)":  round(float(np.max(r['C_dwj'])), 2),
-        "DWJ Tmax (wk)":    round(float(tw[np.argmax(r['C_dwj'])]), 1),
+        "Cohort":           coh,
+        "Cmax (mg/L)":      round(float(np.max(r['C_mgL'])), 4),
+        "Tmax (wk)":        round(float(tw[np.argmax(r['C_mgL'])]), 1),
+        "Clast (mg/L)":     round(float(r['C_mgL'][-1]), 4),
         "Max BW loss (%)":  round(float(np.min(r['BW_pct'])), 2),
         "Peak GI AE (%)":   round(float(np.max(r['GI_rate'])), 1),
     })
@@ -545,11 +617,11 @@ st.dataframe(
     use_container_width=True,
     hide_index=True,
     column_config={
-        "Cohort":           st.column_config.TextColumn(width="large"),
-        "Sema Cmax (µg/L)": st.column_config.NumberColumn(format="%.2f"),
-        "DWJ Cmax (µg/L)":  st.column_config.NumberColumn(format="%.2f"),
-        "Max BW loss (%)":  st.column_config.NumberColumn(format="%.2f"),
-        "Peak GI AE (%)":   st.column_config.NumberColumn(format="%.1f"),
+        "Cohort":          st.column_config.TextColumn(width="large"),
+        "Cmax (mg/L)":     st.column_config.NumberColumn(format="%.4f"),
+        "Clast (mg/L)":    st.column_config.NumberColumn(format="%.4f"),
+        "Max BW loss (%)": st.column_config.NumberColumn(format="%.2f"),
+        "Peak GI AE (%)":  st.column_config.NumberColumn(format="%.1f"),
     }
 )
 
@@ -566,7 +638,7 @@ st.download_button(
 st.markdown("---")
 st.markdown("""
 <div style='text-align:center; color:#3a4560; font-size:0.75rem; padding:8px 0'>
-  PK/PD Simulator · Demo v1.0 · Placeholder parameters —
-  replace with NONMEM/Monolix/Phoenix NLME estimates
+  PK/PD Simulator · Phoenix NLME Model (Taeheon Kim, Ph.D. · 2026-02-19) ·
+  1-Cpt Multiple Absorption (LAI + SC) · Indirect Response BW · Simple Emax GI AE
 </div>
 """, unsafe_allow_html=True)
