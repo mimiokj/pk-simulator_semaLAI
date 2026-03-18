@@ -277,8 +277,19 @@ import datetime
 import numpy as np
 from scipy.integrate import trapezoid
 
+import io
+import datetime
+import numpy as np
+from scipy.integrate import trapezoid
+
 def generate_pdf_report(results, rows_df, multiplier, obs_weeks,
                         tau_h, ni_margin, fig_pk, fig_bw, fig_gi):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib.lines import Line2D
+
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors as rlc
     from reportlab.lib.units import mm
@@ -305,13 +316,14 @@ def generate_pdf_report(results, rows_df, multiplier, obs_weeks,
     sT  = ParagraphStyle("T",  parent=styles["Normal"], fontSize=15,
                          textColor=WHITE, fontName="Helvetica-Bold", leading=20)
     sSb = ParagraphStyle("Sb", parent=styles["Normal"], fontSize=8.5,
-                         textColor=rlc.HexColor("#93c5fd"), fontName="Helvetica", leading=12)
+                         textColor=rlc.HexColor("#93c5fd"),
+                         fontName="Helvetica", leading=12)
     sH  = ParagraphStyle("H",  parent=styles["Normal"], fontSize=11,
                          textColor=NAVY, fontName="Helvetica-Bold",
                          spaceBefore=6, spaceAfter=3)
     sSm = ParagraphStyle("Sm", parent=styles["Normal"], fontSize=7.5,
                          textColor=DGRAY, fontName="Helvetica", leading=11)
-    sSmB= ParagraphStyle("SmB",parent=styles["Normal"], fontSize=7.5,
+    sSmW= ParagraphStyle("SmW",parent=styles["Normal"], fontSize=7.5,
                          textColor=WHITE, fontName="Helvetica-Bold", leading=11)
     sSmN= ParagraphStyle("SmN",parent=styles["Normal"], fontSize=7.5,
                          textColor=NAVY, fontName="Helvetica-Bold", leading=11)
@@ -333,11 +345,11 @@ def generate_pdf_report(results, rows_df, multiplier, obs_weeks,
     iw    = W - 2*marg
     story = []
 
-    # ── 헤더 배너 (canvas 직접 그리기 방식) ──
-    # Table에 Paragraph 리스트가 아닌 단일 Paragraph로 넣어야 함
+    # ── 헤더 배너 ──
     banner_data = [
         [Paragraph("DWJ1691 + Wegovy  PK/PD Simulation Report", sT)],
-        [Paragraph("Minipig PK &rarr; Human Prediction &middot; Phoenix NLME &middot; Taeheon Kim, Ph.D.", sSb)],
+        [Paragraph("Minipig PK to Human Prediction  |  Phoenix NLME  |  "
+                   "Taeheon Kim, Ph.D.", sSb)],
     ]
     banner = Table(banner_data, colWidths=[iw])
     banner.setStyle(TableStyle([
@@ -357,21 +369,24 @@ def generate_pdf_report(results, rows_df, multiplier, obs_weeks,
     story.append(HRFlowable(width=iw, thickness=1, color=BLUE, spaceAfter=3))
 
     cfg_rows = [
-        ["Parameter", "Value"],
-        ["Dose Multiplier",          f"{multiplier}x (vs. Wegovy)"],
-        ["Cohort I Dose",            f"{1000*multiplier/1000:.1f} mg  ({1000*multiplier:,} ug)"],
-        ["Cohort II Dose",           f"{1700*multiplier/1000:.1f} mg  ({1700*multiplier:,} ug)"],
-        ["Cohort III Dose",          f"{2400*multiplier/1000:.1f} mg  ({2400*multiplier:,} ug)"],
-        ["Observation Window (tau)", f"{obs_weeks} weeks  ({int(tau_h)} h)"],
-        ["Safety Cmax Threshold",    f"{ni_margin}x vs. Wegovy"],
-        ["Report Generated",         now_str],
+        ("Parameter", "Value"),
+        ("Dose Multiplier",          f"{multiplier}x (vs. Wegovy)"),
+        ("Cohort I Dose",            f"{1000*multiplier/1000:.1f} mg  "
+                                     f"({1000*multiplier:,} ug)"),
+        ("Cohort II Dose",           f"{1700*multiplier/1000:.1f} mg  "
+                                     f"({1700*multiplier:,} ug)"),
+        ("Cohort III Dose",          f"{2400*multiplier/1000:.1f} mg  "
+                                     f"({2400*multiplier:,} ug)"),
+        ("Observation Window (tau)", f"{obs_weeks} weeks  ({int(tau_h)} h)"),
+        ("Safety Cmax Threshold",    f"{ni_margin}x vs. Wegovy"),
+        ("Report Generated",         now_str),
     ]
     cfg_data = []
-    for i, row in enumerate(cfg_rows):
+    for i, (k, v) in enumerate(cfg_rows):
         if i == 0:
-            cfg_data.append([Paragraph(row[0], sSmB), Paragraph(row[1], sSmB)])
+            cfg_data.append([Paragraph(k, sSmW), Paragraph(v, sSmW)])
         else:
-            cfg_data.append([Paragraph(row[0], sSm), Paragraph(row[1], sSm)])
+            cfg_data.append([Paragraph(k, sSm),  Paragraph(v, sSm)])
 
     cfg_tbl = Table(cfg_data, colWidths=[iw*0.44, iw*0.56])
     cfg_tbl.setStyle(TableStyle([
@@ -386,77 +401,166 @@ def generate_pdf_report(results, rows_df, multiplier, obs_weeks,
     story.append(cfg_tbl)
     story.append(Spacer(1, 4*mm))
 
-    # ── 차트 이미지 ──
+    # ── 차트 — matplotlib으로 직접 그리기 ──
     story.append(Paragraph("PK/PD Profiles", sH))
     story.append(HRFlowable(width=iw, thickness=1, color=BLUE, spaceAfter=3))
 
-    def fig_to_img(fig, w_pt, h_pt):
-        """Plotly figure → PNG bytes (kaleido 없으면 SVG fallback)"""
-        try:
-            # kaleido 방식 (Streamlit Cloud 기본 지원)
-            img_bytes = fig.to_image(
-                format="png",
-                width=int(w_pt * 2.5),
-                height=int(h_pt * 2.5),
-                scale=2
-            )
-            return io.BytesIO(img_bytes)
-        except Exception:
-            return None
+    HOURS_PER_WEEK = 168.0
+    COHORT_COLORS_MPL = {
+        "Reference (Wegovy)":      "#64748b",
+        "Cohort I (W-W-T-W-W)":   "#2166ac",
+        "Cohort II (W-W-W-T-W)":  "#16a34a",
+        "Cohort III (W-W-W-W-T)": "#dc2626",
+    }
+    COHORT_LABELS = {
+        "Reference (Wegovy)":      "Wegovy (Ref)",
+        "Cohort I (W-W-T-W-W)":   "Cohort I",
+        "Cohort II (W-W-W-T-W)":  "Cohort II",
+        "Cohort III (W-W-W-W-T)": "Cohort III",
+    }
+    COHORT_LS = {
+        "Reference (Wegovy)":      "--",
+        "Cohort I (W-W-T-W-W)":   "-",
+        "Cohort II (W-W-W-T-W)":  "-",
+        "Cohort III (W-W-W-W-T)": "-",
+    }
 
-    pk_img = fig_to_img(fig_pk, iw, 190)
-    bw_img = fig_to_img(fig_bw, iw*0.5-3, 140)
-    gi_img = fig_to_img(fig_gi, iw*0.5-3, 140)
+    def mpl_chart_to_bytes(fig_mpl):
+        buf2 = io.BytesIO()
+        fig_mpl.savefig(buf2, format="png", dpi=180,
+                        bbox_inches="tight", facecolor="white")
+        buf2.seek(0)
+        plt.close(fig_mpl)
+        return buf2
 
-    charts_ok = pk_img and bw_img and gi_img
-    if charts_ok:
-        story.append(RLImage(pk_img, width=iw, height=190))
-        story.append(Spacer(1, 2*mm))
-        side = Table(
-            [[RLImage(bw_img, width=iw*0.5-3, height=140),
-              RLImage(gi_img, width=iw*0.5-3, height=140)]],
-            colWidths=[iw*0.5, iw*0.5]
-        )
-        side.setStyle(TableStyle([
-            ("LEFTPADDING",  (0,0),(-1,-1), 0),
-            ("RIGHTPADDING", (0,0),(-1,-1), 0),
-            ("TOPPADDING",   (0,0),(-1,-1), 0),
-            ("BOTTOMPADDING",(0,0),(-1,-1), 0),
-        ]))
-        story.append(side)
-    else:
-        story.append(Paragraph(
-            "[Chart images unavailable: kaleido not installed. "
-            "Add 'kaleido>=0.2.1' to requirements.txt]", sSm))
+    # PK chart
+    fig1, ax1 = plt.subplots(figsize=(9, 3.6))
+    ax1.set_facecolor("#fafbfc")
+    fig1.patch.set_facecolor("white")
+    for coh, r in results.items():
+        t_wk = r['t_h'] / HOURS_PER_WEEK
+        s    = max(1, len(t_wk)//3000)
+        ax1.plot(t_wk[::s], r['C_ugL'][::s],
+                 color=COHORT_COLORS_MPL[coh],
+                 ls=COHORT_LS[coh], lw=1.8,
+                 label=COHORT_LABELS[coh])
+    ax1.set_xlabel("Time (Week)", fontsize=10, color="#1e293b", fontweight="bold")
+    ax1.set_ylabel("Plasma conc. (ug/L)", fontsize=10, color="#1e293b", fontweight="bold")
+    ax1.tick_params(colors="#374151", labelsize=9)
+    ax1.grid(color="#e2e8f0", linewidth=0.6)
+    for spine in ax1.spines.values():
+        spine.set_edgecolor("#475569")
+    ax1.legend(fontsize=8, loc="upper left",
+               framealpha=0.9, edgecolor="#cbd5e1")
+    ax1.set_title("PK Profile", fontsize=11, color="#1e3a5f", fontweight="bold")
+    pk_io = mpl_chart_to_bytes(fig1)
+
+    # BW chart
+    fig2, ax2 = plt.subplots(figsize=(4.4, 2.8))
+    ax2.set_facecolor("#fafbfc"); fig2.patch.set_facecolor("white")
+    for coh, r in results.items():
+        t_wk = r['t_h'] / HOURS_PER_WEEK
+        s    = max(1, len(t_wk)//3000)
+        ax2.plot(t_wk[::s], r['BW_pct'][::s],
+                 color=COHORT_COLORS_MPL[coh],
+                 ls=COHORT_LS[coh], lw=1.8,
+                 label=COHORT_LABELS[coh])
+    ax2.axhline(0, color="#94a3b8", ls=":", lw=1)
+    ax2.set_xlabel("Time (Week)", fontsize=9, color="#1e293b", fontweight="bold")
+    ax2.set_ylabel("dBW (%)", fontsize=9, color="#1e293b", fontweight="bold")
+    ax2.tick_params(colors="#374151", labelsize=8)
+    ax2.grid(color="#e2e8f0", linewidth=0.5)
+    for spine in ax2.spines.values():
+        spine.set_edgecolor("#475569")
+    ax2.set_title("Body Weight Change", fontsize=10,
+                  color="#1e3a5f", fontweight="bold")
+    bw_io = mpl_chart_to_bytes(fig2)
+
+    # GI chart
+    fig3, ax3 = plt.subplots(figsize=(4.4, 2.8))
+    ax3.set_facecolor("#fafbfc"); fig3.patch.set_facecolor("white")
+    for coh, r in results.items():
+        t_wk = r['t_h'] / HOURS_PER_WEEK
+        s    = max(1, len(t_wk)//3000)
+        ax3.plot(t_wk[::s], r['GI_total'][::s],
+                 color=COHORT_COLORS_MPL[coh],
+                 ls=COHORT_LS[coh], lw=1.8,
+                 label=COHORT_LABELS[coh])
+    ax3.set_ylim(0, 100)
+    ax3.set_xlabel("Time (Week)", fontsize=9, color="#1e293b", fontweight="bold")
+    ax3.set_ylabel("GI AE Total (%)", fontsize=9, color="#1e293b", fontweight="bold")
+    ax3.tick_params(colors="#374151", labelsize=8)
+    ax3.grid(color="#e2e8f0", linewidth=0.5)
+    for spine in ax3.spines.values():
+        spine.set_edgecolor("#475569")
+    ax3.set_title("GI Adverse Event Rate", fontsize=10,
+                  color="#1e3a5f", fontweight="bold")
+    gi_io = mpl_chart_to_bytes(fig3)
+
+    # PK 전체 너비
+    story.append(RLImage(pk_io, width=iw, height=iw*3.6/9))
+    story.append(Spacer(1, 2*mm))
+
+    # BW + GI 나란히
+    hw = iw * 0.5 - 2
+    hh = hw * 2.8 / 4.4
+    side = Table(
+        [[RLImage(bw_io, width=hw, height=hh),
+          RLImage(gi_io, width=hw, height=hh)]],
+        colWidths=[iw*0.5, iw*0.5]
+    )
+    side.setStyle(TableStyle([
+        ("LEFTPADDING",  (0,0),(-1,-1), 0),
+        ("RIGHTPADDING", (0,0),(-1,-1), 0),
+        ("TOPPADDING",   (0,0),(-1,-1), 0),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
+    ]))
+    story.append(side)
     story.append(Spacer(1, 4*mm))
 
     # ── 결과 테이블 ──
     story.append(Paragraph(
-        f"Observation Window Results  (tau = {obs_weeks} wk / {int(tau_h)} h)", sH))
+        f"Observation Window Results  "
+        f"(tau = {obs_weeks} wk / {int(tau_h)} h)", sH))
     story.append(HRFlowable(width=iw, thickness=1, color=BLUE, spaceAfter=3))
 
     if rows_df is not None and len(rows_df) > 0:
         cols = list(rows_df.columns)
         n    = len(cols)
-        # 컬럼 너비 배분
-        col_widths = []
-        for c in cols:
-            if c in ["구분", "시험약 용량"]:
-                col_widths.append(iw * 0.16)
-            elif c in ["Safety"]:
-                col_widths.append(iw * 0.07)
-            else:
-                col_widths.append((iw - iw*0.16*2 - iw*0.07) / (n-3))
 
-        hrow = [Paragraph(f"<b>{c}</b>", sSmB) for c in cols]
+        # 컬럼 너비
+        wide_cols  = {"구분", "시험약 용량"}
+        narrow_cols= {"Safety"}
+        cws = []
+        n_wide   = sum(1 for c in cols if c in wide_cols)
+        n_narrow = sum(1 for c in cols if c in narrow_cols)
+        n_mid    = n - n_wide - n_narrow
+        w_wide   = iw * 0.17
+        w_narrow = iw * 0.07
+        w_mid    = (iw - w_wide*n_wide - w_narrow*n_narrow) / max(n_mid, 1)
+        for c in cols:
+            if c in wide_cols:   cws.append(w_wide)
+            elif c in narrow_cols: cws.append(w_narrow)
+            else:                cws.append(w_mid)
+
+        # 헤더
+        hrow = [Paragraph(c, sSmW) for c in cols]
         tdata = [hrow]
+
         for _, row in rows_df.iterrows():
             trow = []
             for v in row.values:
-                # 특수문자 → ASCII 대체
                 s = str(v) if v is not None else "-"
-                s = s.replace("✅", "OK").replace("⚠️", "WARN").replace("µ", "u")
-                s = s.replace("τ", "tau").replace("Δ", "d").replace("×", "x")
+                # 특수문자 ASCII 치환
+                s = (s.replace("✅","OK")
+                      .replace("⚠️","WARN")
+                      .replace("⚠","WARN")
+                      .replace("µ","u")
+                      .replace("τ","tau")
+                      .replace("Δ","d")
+                      .replace("×","x")
+                      .replace("·",".")
+                      .replace("→","->"))
                 trow.append(Paragraph(s, sSm))
             tdata.append(trow)
 
@@ -476,78 +580,19 @@ def generate_pdf_report(results, rows_df, multiplier, obs_weeks,
                 ts.append(("BACKGROUND", (0,i),(-1,i), LGRAY))
             else:
                 ts.append(("BACKGROUND", (0,i),(-1,i),
-                            LBLUE if i%2==0 else WHITE))
-            # Safety 컬럼 색상
-            if "OK" in last or "✅" in last:
+                            LBLUE if i % 2 == 0 else WHITE))
+            if "OK" in last:
                 ts.append(("TEXTCOLOR", (-1,i),(-1,i), GREEN))
-            elif "WARN" in last or "⚠" in last:
+            elif "WARN" in last:
                 ts.append(("TEXTCOLOR", (-1,i),(-1,i), RED))
 
-        rtbl = Table(tdata, colWidths=col_widths, repeatRows=1)
+        rtbl = Table(tdata, colWidths=cws, repeatRows=1)
         rtbl.setStyle(TableStyle(ts))
         story.append(rtbl)
 
     story.append(Spacer(1, 4*mm))
 
-    # ── 파라미터 표 ──
-    story.append(Paragraph("Model Parameters (Phoenix NLME fixef)", sH))
-    story.append(HRFlowable(width=iw, thickness=1, color=BLUE, spaceAfter=3))
-
-    pdata_left = [
-        ["Parameter",    "Value",   "Unit"],
-        ["V",            "12.4",    "L"],
-        ["CL",           "0.0475",  "L/h"],
-        ["Ka (FR-A1)",   "0.1026",  "h-1"],
-        ["ka_SC (R-A1)", "0.0296",  "h-1"],
-        ["F_SC",         "0.9",     "-"],
-        ["Scale_LAI",    "0.2459",  "-"],
-        ["F_DR",         "0.429",   "-"],
-    ]
-    pdata_right = [
-        ["Parameter",    "Value",    "Unit"],
-        ["kdr",          "0.02",     "h-1"],
-        ["Imax",         "0.25",     "-"],
-        ["IC50",         "55.0",     "ug/L"],
-        ["kout",         "0.00039",  "h-1"],
-        ["E0_AE",        "0.4833",   "-"],
-        ["Emax_AE",      "0.2867",   "-"],
-        ["EC50_AE",      "32.98",    "ug/L"],
-    ]
-
-    def make_ptbl(data):
-        dp = []
-        for i, row in enumerate(data):
-            if i == 0:
-                dp.append([Paragraph(c, sSmN) for c in row])
-            else:
-                dp.append([Paragraph(c, sSm) for c in row])
-        t = Table(dp, colWidths=[iw*0.19, iw*0.09, iw*0.09])
-        t.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0),(-1,0),  rlc.HexColor("#e0e7ff")),
-            ("ROWBACKGROUNDS",(0,1),(-1,-1), [LGRAY, WHITE]),
-            ("GRID",          (0,0),(-1,-1), 0.3, rlc.HexColor("#e2e8f0")),
-            ("FONTSIZE",      (0,0),(-1,-1), 7.5),
-            ("TOPPADDING",    (0,0),(-1,-1), 3),
-            ("BOTTOMPADDING", (0,0),(-1,-1), 3),
-            ("LEFTPADDING",   (0,0),(-1,-1), 5),
-            ("RIGHTPADDING",  (0,0),(-1,-1), 5),
-        ]))
-        return t
-
-    pr = Table(
-        [[make_ptbl(pdata_left), make_ptbl(pdata_right)]],
-        colWidths=[iw*0.5-2, iw*0.5-2]
-    )
-    pr.setStyle(TableStyle([
-        ("LEFTPADDING",  (0,0),(-1,-1), 0),
-        ("RIGHTPADDING", (0,0),(-1,-1), 4),
-        ("TOPPADDING",   (0,0),(-1,-1), 0),
-        ("BOTTOMPADDING",(0,0),(-1,-1), 0),
-    ]))
-    story.append(pr)
-    story.append(Spacer(1, 4*mm))
-
-    # ── Phoenix 검증 ──
+    # ── 푸터 ──
     story.append(HRFlowable(width=iw, thickness=0.5,
                             color=rlc.HexColor("#cbd5e1"), spaceAfter=3))
     story.append(Paragraph(
